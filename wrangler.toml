@@ -1,4 +1,4 @@
-name = "good-morning-bot"
+name = "gm"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
