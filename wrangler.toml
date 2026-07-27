@@ -9,12 +9,12 @@ crons = ["* * * * *"]
 
 [[kv_namespaces]]
 binding = "BOT_KV"
-id = "369330135"
+id = "cc8922a4ea494abfb6549905a790fad6"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "good-morning-db"
-database_id = "369330135"
+database_id = "4e22255b-c22e-4103-b564-14ceee0f4d4f"
 
 [observability]
 enabled = true
