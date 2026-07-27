@@ -1,0 +1,20 @@
+name = "good-morning-bot"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Cron раз в минуту: воркер сам решает, кому пора отправлять.
+# 1440 вызовов в сутки при бесплатном лимите 100 000/сутки.
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "369330135"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "good-morning-db"
+database_id = "369330135"
+
+[observability]
+enabled = true
