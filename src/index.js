@@ -57,7 +57,10 @@ async function route(update, env) {
     if (!message) return;
 
     if (typeof message.text === "string" && message.text.startsWith("/")) {
-      return handleCommand(message, env);
+      // У channel_post нет поля from: помечаем такие апдейты явно,
+      // иначе userId === undefined и все проверки прав молча падают в false.
+      const isChannelPost = Boolean(update.channel_post && !update.message);
+      return handleCommand(message, env, { isChannelPost });
     }
   } catch (error) {
     console.log("route error:", String(error));

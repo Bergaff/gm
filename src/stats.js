@@ -73,12 +73,20 @@ async function overview(chatId, days, env) {
 async function byModel(chatId, days, env) {
   const from = sinceDate(days);
 
+  // Голоса агрегируются ДО join, иначе COUNT(*) и AVG(latency)
+  // множатся на число голосов у поста.
   const { results } = await env.DB.prepare(
     `SELECT p.provider, p.model, COUNT(*) AS posts,
             ROUND(AVG(p.latency_ms)) AS latency,
-            COALESCE(SUM(CASE WHEN v.vote=1  THEN 1 ELSE 0 END),0) AS likes,
-            COALESCE(SUM(CASE WHEN v.vote=-1 THEN 1 ELSE 0 END),0) AS dislikes
-     FROM posts p LEFT JOIN votes v ON v.post_id = p.id
+            COALESCE(SUM(v.likes),0)    AS likes,
+            COALESCE(SUM(v.dislikes),0) AS dislikes
+     FROM posts p
+     LEFT JOIN (
+       SELECT post_id,
+              SUM(CASE WHEN vote=1  THEN 1 ELSE 0 END) AS likes,
+              SUM(CASE WHEN vote=-1 THEN 1 ELSE 0 END) AS dislikes
+       FROM votes GROUP BY post_id
+     ) v ON v.post_id = p.id
      WHERE p.local_date >= ? AND p.provider IS NOT NULL
      GROUP BY p.provider ORDER BY likes DESC, posts DESC`
   ).bind(from).all();
@@ -123,9 +131,15 @@ async function byChat(chatId, days, env) {
 
   const { results } = await env.DB.prepare(
     `SELECT p.chat_id, p.chat_title, COUNT(*) AS posts,
-            COALESCE(SUM(CASE WHEN v.vote=1  THEN 1 ELSE 0 END),0) AS likes,
-            COALESCE(SUM(CASE WHEN v.vote=-1 THEN 1 ELSE 0 END),0) AS dislikes
-     FROM posts p LEFT JOIN votes v ON v.post_id = p.id
+            COALESCE(SUM(v.likes),0)    AS likes,
+            COALESCE(SUM(v.dislikes),0) AS dislikes
+     FROM posts p
+     LEFT JOIN (
+       SELECT post_id,
+              SUM(CASE WHEN vote=1  THEN 1 ELSE 0 END) AS likes,
+              SUM(CASE WHEN vote=-1 THEN 1 ELSE 0 END) AS dislikes
+       FROM votes GROUP BY post_id
+     ) v ON v.post_id = p.id
      WHERE p.local_date >= ? GROUP BY p.chat_id ORDER BY posts DESC`
   ).bind(from).all();
 
@@ -224,7 +238,10 @@ async function health(chatId, env) {
 
   for (const provider of NIM_PROVIDERS) {
     const started = Date.now();
-    const result = await generateImage(prompt, env, { preferred: provider.id });
+    const result = await generateImage(prompt, env, {
+      preferred: provider.id,
+      noFallback: true,
+    });
     const ok = result.ok && result.provider === provider.id;
     const attempt = result.attempts?.find((a) => a.provider === provider.id);
 

@@ -75,7 +75,12 @@ export async function runScheduler(env) {
       const target = targetMinute(chatId, now.date, spec);
 
       if (target === null) continue;
-      if (now.hour * 60 + now.minute !== target) continue;
+
+      // Cron не гарантирует точность до минуты: досылаем, если тик опоздал,
+      // но не позже чем на 90 минут. От дублей защищает guardKey ниже.
+      const nowMinute = now.hour * 60 + now.minute;
+      if (nowMinute < target) continue;
+      if (nowMinute - target > 90) continue;
 
       const guardKey = `sent:${chatId}:${now.date}`;
       if (await env.BOT_KV.get(guardKey)) continue;

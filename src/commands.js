@@ -135,16 +135,35 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   return { postId, status, provider: image?.provider, error };
 }
 
-export async function handleCommand(message, env) {
+const KNOWN_COMMANDS = new Set([
+  "/start", "/help", "/settings",
+  "/set_source", "/set_gdrive", "/refresh_gdrive", "/set_prompt",
+  "/models", "/set_model", "/set_timezone",
+  "/set_weekday_time", "/set_weekend_time",
+  "/voting_on", "/voting_off", "/enable", "/disable",
+  "/test", "/reset",
+  "/stats", "/stats_models", "/stats_chats", "/stats_recent",
+  "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv",
+]);
+
+export async function handleCommand(message, env, options = {}) {
+  const { isChannelPost = false } = options;
+
   const chatId = String(message.chat.id);
   const userId = message.from?.id;
   const text = (message.text || "").trim();
 
-  await registerChat(chatId, message.chat, env);
-
   const [rawCommand, ...rest] = text.split(/\s+/);
   const command = rawCommand.split("@")[0].toLowerCase();
   const value = rest.join(" ").trim();
+
+  // Регистрируем чат только на осмысленные команды, а не на любой текст с "/".
+  // Иначе первый встречный в личке создаёт запись в KV и попадает в рассылку.
+  if (KNOWN_COMMANDS.has(command)) {
+    await registerChat(chatId, message.chat, env);
+  } else {
+    return;
+  }
 
   if (
     command.startsWith("/stats") ||
@@ -172,21 +191,17 @@ export async function handleCommand(message, env) {
   }
 
   const allowed = await isChatAdmin(chatId, userId, env);
-  if (!allowed && !isAdmin(userId)) {
-    await sendMessage(chatId, "⛔ Настройки может менять только администратор чата.", env);
-    return;
-  }
 
-  switch (command) {
-    case "/set_source": {
-      if (!["gdrive", "nim", "mixed"].includes(value)) {
-        await sendMessage(chatId, "Использование: <code>/set_source gdrive|nim|mixed</code>", env);
+    switch (command) {
+      case "/set_source": {
+        if (!["gdrive", "nim", "mixed"].includes(value)) {
+          await sendMessage(chatId, "Использование: <code>/set_source gdrive|nim|mixed</code>", env);
+          return;
+        }
+        await patchSettings(chatId, { source: value }, env);
+        await sendMessage(chatId, `✅ Источник картинок: <b>${value}</b>`, env);
         return;
       }
-      await patchSettings(chatId, { source: value }, env);
-      await sendMessage(chatId, `✅ Источник картинок: <b>${value}</b>`, env);
-      return;
-    }
 
     case "/set_gdrive": {
       const folderId = parseFolderId(value);

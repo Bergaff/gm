@@ -1,8 +1,7 @@
 // ⚠️ Только эти Telegram ID видят статистику. Узнать свой: @userinfobot
 export const ADMIN_IDS = [
   369330135,
-  222222222,
-];
+  ];
 
 export const DEFAULT_SETTINGS = {
   enabled: true,

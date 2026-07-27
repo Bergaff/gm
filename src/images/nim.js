@@ -176,18 +176,27 @@ async function isCoolingDown(id, env) {
   return Boolean(await env.BOT_KV.get(`nimfail:${id}`));
 }
 
-function markFailed(id, env) {
-  return env.BOT_KV.put(`nimfail:${id}`, "1", { expirationTtl: FAIL_COOLDOWN });
+function markFailed(id, env, status = 0) {
+  // 400/422 — это плохой запрос (например, промпт), повтор через 30 минут
+  // ничего не изменит и зря выключает рабочую модель. 401/403/429 и 5xx —
+  // временные/квотные, их гасим на полный срок.
+  if (status === 400 || status === 422) return;
+  const ttl = status === 429 || status >= 500 ? FAIL_COOLDOWN : 5 * 60;
+  return env.BOT_KV.put(`nimfail:${id}`, "1", { expirationTtl: ttl });
 }
 
 export async function generateImage(prompt, env, options = {}) {
-  const { preferred = "auto", chatId = null } = options;
+  const { preferred = "auto", chatId = null, noFallback = false } = options;
 
   let queue;
 
   if (preferred !== "auto" && getProvider(preferred)) {
     const pinned = getProvider(preferred);
-    queue = [pinned, ...NIM_PROVIDERS.filter((p) => p.id !== pinned.id)];
+    // noFallback: только запрошенная модель (нужно для /nim_health,
+    // иначе 7 моделей x 7 попыток = до 49 субреквестов при лимите 50).
+    queue = noFallback
+      ? [pinned]
+      : [pinned, ...NIM_PROVIDERS.filter((p) => p.id !== pinned.id)];
   } else {
     const offset = Math.floor(Math.random() * NIM_PROVIDERS.length);
     queue = [...NIM_PROVIDERS.slice(offset), ...NIM_PROVIDERS.slice(0, offset)];
@@ -232,7 +241,7 @@ export async function generateImage(prompt, env, options = {}) {
       };
     }
 
-    await markFailed(provider.id, env);
+    await markFailed(provider.id, env, result.status);
   }
 
   return { ok: false, attempts };
