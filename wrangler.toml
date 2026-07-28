@@ -16,5 +16,9 @@ binding = "DB"
 database_name = "good-morning-db"
 database_id = "4e22255b-c22e-4103-b564-14ceee0f4d4f"
 
+# Бесплатная генерация картинок: 10 000 нейронов/сутки, ключ не нужен
+[ai]
+binding = "AI"
+
 [observability]
 enabled = true

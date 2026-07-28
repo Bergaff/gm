@@ -170,8 +170,45 @@ function fillTemplate(node, prompt, seed) {
 
 // Встроенные NVIDIA + добавленные пользователем
 export function getAllProviders(env) {
-  return [...NIM_PROVIDERS, ...getCustomProviders(env)];
+  // Cloudflare идёт первым: бесплатный и не тратит кредиты NVIDIA.
+  return [...getCfProviders(env), ...NIM_PROVIDERS, ...getCustomProviders(env)];
 }
+
+/**
+ * Cloudflare Workers AI — БЕСПЛАТНО 10 000 нейронов в сутки.
+ * Ключ не нужен: бот уже работает на Cloudflare, доступ идёт через
+ * binding env.AI (добавляется в wrangler.toml секцией [ai]).
+ * Сброс лимита ежедневно в 00:00 UTC.
+ */
+export const CF_PROVIDERS = [
+  {
+    id: "cf-flux",
+    title: "FLUX.1 schnell (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/black-forest-labs/flux-1-schnell",
+    build: (prompt, seed) => ({ prompt, seed, steps: 4 }),
+  },
+  {
+    id: "cf-sdxl",
+    title: "SDXL Lightning (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/bytedance/stable-diffusion-xl-lightning",
+    build: (prompt) => ({ prompt }),
+  },
+  {
+    id: "cf-dreamshaper",
+    title: "DreamShaper 8 (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/lykon/dreamshaper-8-lcm",
+    build: (prompt) => ({ prompt }),
+  },
+];
+
+// Доступны, только если в wrangler.toml подключён binding [ai]
+function getCfProviders(env) {
+  return env && env.AI ? CF_PROVIDERS : [];
+}
+
 
 export function getProvider(id, env = null) {
   const list = env ? getAllProviders(env) : NIM_PROVIDERS;
@@ -224,6 +261,33 @@ export function base64ToBytes(base64) {
 async function callProvider(provider, prompt, env, apiKey) {
   const seed = Math.floor(Math.random() * 2 ** 31);
   const started = Date.now();
+
+  // Cloudflare Workers AI — через binding, без ключа и без fetch.
+  if (provider.binding) {
+    try {
+      const out = await env.AI.run(provider.model, provider.build(prompt, seed));
+      const b64 = out?.image || (typeof out === "string" ? out : null);
+
+      if (b64) {
+        return { ok: true, status: 200, latency: Date.now() - started,
+                 bytes: base64ToBytes(b64), seed };
+      }
+      // некоторые модели отдают поток байтов
+      if (out instanceof ReadableStream) {
+        const buf = await new Response(out).arrayBuffer();
+        return { ok: true, status: 200, latency: Date.now() - started,
+                 bytes: new Uint8Array(buf), seed };
+      }
+      return { ok: false, status: 0, latency: Date.now() - started,
+               error: "Workers AI: нет изображения в ответе" };
+    } catch (e) {
+      const msg = String(e?.message || e);
+      return {
+        ok: false, status: /limit|quota|exceed/i.test(msg) ? 429 : 0,
+        latency: Date.now() - started, error: msg.slice(0, 250),
+      };
+    }
+  }
 
   // У своего провайдера — свой ключ (имя переменной задано в keyEnv)
   // и свой способ авторизации.
@@ -313,15 +377,24 @@ function markFailed(id, env, status = 0) {
 export async function generateImage(prompt, env, options = {}) {
   const { preferred = "auto", chatId = null, noFallback = false } = options;
 
+  // Пустой промпт — модели вернут мусор или ошибку. Отсекаем сразу.
+  if (!String(prompt || "").trim()) {
+    return {
+      ok: false,
+      attempts: [{ provider: "-", ok: false, status: 0, latency: 0,
+                   error: "Пустой промпт. Добавьте его: /add_prompt weekday <текст>" }],
+    };
+  }
+
   const keys = getApiKeys(env);
-  const hasCustom = getCustomProviders(env).length > 0;
+  const hasCustom = getCustomProviders(env).length > 0 || getCfProviders(env).length > 0;
 
   // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
   if (!keys.length && !hasCustom) {
     return {
       ok: false,
       attempts: [{ provider: "-", ok: false, status: 0, latency: 0,
-                   error: "Не задан ни один ключ (NVIDIA_API_KEY или IMAGE_PROVIDERS_JSON)" }],
+                   error: "Нет доступных провайдеров. Включите Workers AI (binding [ai] в wrangler.toml) или задайте NVIDIA_API_KEY" }]
     };
   }
   let keyIndex = keys.length ? await pickKeyIndex(keys, env) : 0;
@@ -360,7 +433,7 @@ export async function generateImage(prompt, env, options = {}) {
       result = await callProvider(provider, prompt, env, keys[keyIndex] || null);
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
-      if (!provider.custom && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
+      if (!provider.custom && !provider.binding && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
         await markKeyFailed(keyIndex, env, result.status);
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {

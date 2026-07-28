@@ -16,6 +16,26 @@ const TIMEOUT_MS = 12000; // укладываемся в лимит waitUntil (3
 const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const DEFAULT_LLM_MODEL = "meta/llama-3.1-8b-instruct";
 
+
+/**
+ * Бесплатная генерация текста через Cloudflare Workers AI (binding env.AI).
+ * Используется, когда нет внешнего ключа или он исчерпан.
+ * Те же 10 000 нейронов/сутки, что и на картинки.
+ */
+const CF_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
+async function generateViaCfBinding(env, messages) {
+  const out = await env.AI.run(String(env.TEXT_API_MODEL || CF_TEXT_MODEL), {
+    messages,
+    temperature: 1.0,
+    max_tokens: 250,
+  });
+  return String(out?.response || out?.result?.response || "").trim();
+}
+
+
+
+
 export function getTextUrl(env) {
   return String(env.TEXT_API_URL || DEFAULT_LLM_URL).trim();
 }
@@ -90,29 +110,41 @@ export const DEFAULT_CHARACTER =
 
 function buildPrompt(character, isWeekend, chatTitle) {
   const dayType = isWeekend
-    ? "выходной день — отдых, спокойствие, личные дела"
-    : "будний рабочий день — продуктивность, задачи, рабочий настрой";
+    ? "выходной — отдых, никакой работы, можно поспать"
+    : "будний рабочий день — дела, задачи, дедлайны";
 
+  // ВАЖНО: характер чата идёт в system-сообщение и стоит ПЕРВЫМ.
+  // Раньше он был в user, а system диктовал нейтральный тон — модель
+  // слушала system и выдавала пресные фразы, игнорируя иронию.
   return [
     {
       role: "system",
       content:
-        "Ты пишешь короткие утренние приветствия для Telegram-чата на русском языке. " +
-        "Правила:\n" +
-        "1. Всегда начинай с «Доброе утро».\n" +
-        "2. Затем ОДНО предложение на злободневную тему дня.\n" +
-        "3. Всего не более 200 символов.\n" +
-        "4. Без хэштегов, без markdown, без кавычек вокруг ответа.\n" +
-        "5. Живой человеческий тон, не канцелярит.\n" +
-        "Верни ТОЛЬКО текст приветствия, без пояснений.",
+        "Ты — участник этого Telegram-чата и пишешь утреннее приветствие " +
+        "ИМЕННО В ЕГО СТИЛЕ.\n\n" +
+        "=== ХАРАКТЕР ЧАТА (главное правило) ===\n" +
+        character +
+        "\n=== КОНЕЦ ОПИСАНИЯ ===\n\n" +
+        "Пиши так, будто ты свой в этом чате: та же лексика, тот же юмор, " +
+        "та же степень иронии и неформальности. Если чат ироничный — " +
+        "шути. Если грубоватый — не сглаживай. Если сленговый — используй сленг.\n\n" +
+        "Формат:\n" +
+        "1. Начни с «Доброе утро» (можно эмодзи и своими словами: " +
+        "«Доброе утро, страдальцы» и т.п.).\n" +
+        "2. Дальше 1-2 предложения по теме дня — живых, не дежурных.\n" +
+        "3. До 250 символов.\n" +
+        "4. Без хэштегов, markdown и кавычек вокруг ответа.\n\n" +
+        "ЗАПРЕЩЕНО писать безликие штампы вроде «Пусть день будет " +
+        "продуктивным», «Начинаем день на позитиве», «Отличного дня». " +
+        "Такие фразы — провал задачи.\n\n" +
+        "Верни ТОЛЬКО текст приветствия.",
     },
     {
       role: "user",
       content:
-        `Характер чата: ${character}\n` +
-        (chatTitle ? `Название чата: ${chatTitle}\n` : "") +
-        `Сегодня: ${dayType}.\n\n` +
-        "Напиши приветствие.",
+        (chatTitle ? `Чат: ${chatTitle}. ` : "") +
+        `Сегодня ${dayType}.\n\n` +
+        "Напиши приветствие в стиле этого чата.",
     },
   ];
 }
@@ -139,13 +171,27 @@ export async function generateCaption(env, options = {}) {
   const { character = DEFAULT_CHARACTER, isWeekend = false, chatTitle = "" } = options;
 
   const keys = getTextApiKeys(env);
-  if (!keys.length) {
-    return { ok: false, error: "нет ключа NVIDIA для текста (NVIDIA_TEXT_API_KEY)" };
-  }
-
   const model = getTextModel(env);
-
   const started = Date.now();
+  const messages = buildPrompt(character, isWeekend, chatTitle);
+  let lastError = null;
+
+  // Нет внешнего ключа, но есть Workers AI — генерируем бесплатно через него.
+  if (!keys.length) {
+    if (env.AI) {
+      try {
+        const text = cleanup(await generateViaCfBinding(env, messages));
+        if (text) {
+          return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+                   latency: Date.now() - started };
+        }
+        return { ok: false, error: "Workers AI вернул пустой ответ" };
+      } catch (e) {
+        return { ok: false, error: "Workers AI: " + String(e?.message || e).slice(0, 150) };
+      }
+    }
+    return { ok: false, error: "нет ключа для текста (TEXT_API_KEY) и не включён binding [ai]" };
+  }
 
   for (let i = 0; i < Math.min(keys.length, 2); i++) {
     try {
@@ -158,23 +204,25 @@ export async function generateCaption(env, options = {}) {
         },
         body: JSON.stringify({
           model,
-          messages: buildPrompt(character, isWeekend, chatTitle),
-          temperature: 0.9,
+          messages,
+          temperature: 1.0,
           top_p: 0.95,
-          max_tokens: 160,
+          // presence_penalty гонит модель от заезженных формулировок
+          presence_penalty: 0.6,
+          frequency_penalty: 0.3,
+          max_tokens: 250,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
 
       if (!response.ok) {
         const body = await response.text();
+        lastError = `LLM ${response.status}: ${body.slice(0, 150)}`;
         // 401/403/429 — пробуем следующий ключ
         if ([401, 403, 429].includes(response.status) && i + 1 < keys.length) continue;
-        return {
-          ok: false,
-          error: `LLM ${response.status}: ${body.slice(0, 150)}`,
-          latency: Date.now() - started,
-        };
+        // Любая другая ошибка (402 «кончились кредиты», 5xx) — выходим из цикла
+        // и пробуем бесплатный Workers AI ниже, а не сдаёмся сразу.
+        break;
       }
 
       const data = await response.json();
@@ -192,13 +240,25 @@ export async function generateCaption(env, options = {}) {
         latency: Date.now() - started,
       };
     } catch (e) {
-      if (i + 1 >= keys.length) {
-        return { ok: false, error: String(e).slice(0, 150), latency: Date.now() - started };
-      }
+      lastError = String(e).slice(0, 150);
+      if (i + 1 >= keys.length) break;
     }
   }
 
-  return { ok: false, error: "все ключи не сработали", latency: Date.now() - started };
+  // Все внешние ключи отказали — пробуем бесплатный Workers AI.
+  if (env.AI) {
+    try {
+      const text = cleanup(await generateViaCfBinding(env, messages));
+      if (text) {
+        return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+                 latency: Date.now() - started, fallback: true };
+      }
+    } catch {
+      // ниже вернём общую ошибку
+    }
+  }
+
+  return { ok: false, error: lastError || "все ключи не сработали", latency: Date.now() - started };
 }
 
 
@@ -245,7 +305,7 @@ function cacheKeyFor(text) {
 export async function translatePrompt(prompt, env) {
   const original = String(prompt || "").trim();
 
-  if (!original) return { text: original, translated: false };
+  if (original.length < 3) return { text: original, translated: false };
   if (!needsTranslation(original)) return { text: original, translated: false };
 
   const key = cacheKeyFor(original);
@@ -259,8 +319,27 @@ export async function translatePrompt(prompt, env) {
   }
 
   const keys = getTextApiKeys(env);
+
+  // Без внешнего ключа переводим бесплатно через Workers AI
   if (!keys.length) {
-    return { text: original, translated: false, error: "нет ключа для перевода" };
+    if (!env.AI) return { text: original, translated: false, error: "нет ключа для перевода" };
+    try {
+      const out = await env.AI.run(CF_TEXT_MODEL, {
+        messages: [
+          { role: "system", content: "Translate the user's image prompt from Russian to English. Reply with the English prompt only." },
+          { role: "user", content: original },
+        ],
+        max_tokens: 400,
+      });
+      let t = String(out?.response || "").trim().replace(/^["«„']+|["»“']+$/g, "");
+      if (t && !needsTranslation(t)) {
+        try { await env.BOT_KV.put(key, t, { expirationTtl: 90 * 24 * 60 * 60 }); } catch {}
+        return { text: t, translated: true, cached: false };
+      }
+    } catch {
+      // молча возвращаем оригинал ниже
+    }
+    return { text: original, translated: false, error: "Workers AI не перевёл" };
   }
 
   try {
@@ -288,7 +367,8 @@ export async function translatePrompt(prompt, env) {
           { role: "user", content: original },
         ],
         temperature: 0.2,
-        max_tokens: 200,
+        // хватает на промпт до ~1500 символов после перевода
+        max_tokens: 600,
       }),
       signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
     });

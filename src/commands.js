@@ -60,6 +60,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   // Подпись: либо генерирует нейросеть под характер чата, либо готовая фраза.
   let text = pick(now.isWeekend ? WEEKEND_MESSAGES : WEEKDAY_MESSAGES);
   let captionSource = "template";
+  let captionError = null;
 
   if (settings.aiCaptions) {
     const generated = await generateCaption(env, {
@@ -70,6 +71,10 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     if (generated.ok) {
       text = generated.text;
       captionSource = "llm";
+    } else {
+      // Раньше сбой глотался молча, и было непонятно, почему подписи
+      // остаются шаблонными. Теперь причина видна в /test.
+      captionError = generated.error || "неизвестная ошибка";
     }
   }
 
@@ -197,6 +202,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     promptOriginal: useNim && promptTranslated ? rawPrompt : null,
     promptTranslated,
     captionSource,
+    captionError,
     caption: text,
     assetName: image?.assetName || null,
   };
@@ -341,7 +347,7 @@ export function promptsText(settings, kind) {
     lines.push(`<code>${escapeHtml(String(settings.nimPrompt).slice(0, 200))}</code>`);
   } else {
     list.forEach((p, i) => {
-      lines.push(`<b>${i + 1}.</b> <code>${escapeHtml(String(p).slice(0, 250))}</code>`);
+      lines.push(`<b>${i + 1}.</b> <code>${escapeHtml(String(p))}</code>`);
     });
     lines.push("");
     lines.push("<i>Промпт выбирается случайно из списка.</i>");
@@ -660,7 +666,7 @@ export async function handleCommand(message, env, options = {}) {
         );
         return;
       }
-      await patchSettings(chatId, { nimPrompt: value }, env);
+      await patchSettings(chatId, { nimPrompt: value.slice(0, 1500) }, env);
       await sendMessage(chatId, "✅ Общий промпт сохранён.", env);
       return;
     }
@@ -702,7 +708,7 @@ export async function handleCommand(message, env, options = {}) {
           [
             "🎭 <b>Характер чата</b>",
             "",
-            cur ? `Сейчас: <i>${escapeHtml(cur.slice(0, 300))}</i>` : "<i>Пока не задан.</i>",
+            cur ? `Сейчас (${cur.length} симв.):\n<i>${escapeHtml(cur)}</i>` : "<i>Пока не задан.</i>",
             "",
             "Пришлите описание следующим сообщением — или отправьте .txt файлом.",
             "",
@@ -715,7 +721,13 @@ export async function handleCommand(message, env, options = {}) {
         return;
       }
       await patchSettings(chatId, { character: value.slice(0, 2000) }, env);
-      await sendMessage(chatId, "✅ Характер чата сохранён.\n\nВключить генерацию подписей: /ai_on", env);
+      await sendMessage(
+        chatId,
+        `✅ Характер чата сохранён (${Math.min(value.length, 2000)} симв.).` +
+          (value.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
+          "\n\nВключить генерацию подписей: /ai_on",
+        env
+      );
       return;
     }
 
@@ -821,7 +833,7 @@ export async function handleCommand(message, env, options = {}) {
           "",
           `Источник: <b>${s.source}</b>`,
           willUseNim
-            ? `Промпт: <i>${escapeHtml(String(preview).slice(0, 150))}</i>` +
+            ? `Промпт: <i>${escapeHtml(String(preview))}</i>` +
               (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
             : "Картинка: случайная из Google Drive",
           `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
@@ -836,13 +848,16 @@ export async function handleCommand(message, env, options = {}) {
         `Статус: <code>${result.status}</code>`,
         result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
         result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
-        result.promptOriginal
-          ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal).slice(0, 100))}</i>`
+         result.promptOriginal
+          ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal))}</i>`
           : null,
         result.prompt
-          ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt).slice(0, 150))}</i>`
+          ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt))}</i>`
           : null,
         `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
+        result.captionError
+          ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
+          : null,
         result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
       ].filter(Boolean).join("\n");
 
@@ -880,7 +895,9 @@ async function applyPendingValue(pending, text, chatId, env) {
       await patchSettings(chatId, { character: text.slice(0, 2000) }, env);
       await sendMessage(
         chatId,
-        "✅ Характер чата сохранён.\n\nВключить генерацию подписей нейросетью: /ai_on",
+        `✅ Характер чата сохранён (${Math.min(text.length, 2000)} симв.).` +
+          (text.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
+          "\n\nВключить генерацию подписей нейросетью: /ai_on",
         env
       );
       return;
@@ -1011,16 +1028,52 @@ export async function addPrompt(kind, textValue, chatId, env) {
     return;
   }
 
-  list.push(textValue.slice(0, 500));
+  // 1500 символов с запасом. Реальное ограничение — у самих моделей:
+  // CLIP (SDXL, SD3, BRIA) читает только первые ~77 токенов, остальное
+  // молча отбрасывает. FLUX на T5 понимает до 512 токенов.
+  const MAX_PROMPT_CHARS = 1500;
+  const trimmed = String(textValue || "").trim().slice(0, MAX_PROMPT_CHARS);
+
+  // Пустой промпт сохранять нельзя: он давал "no_image" и мусор в переводе.
+  if (trimmed.length < 3) {
+    await sendMessage(
+      chatId,
+      "❌ Промпт слишком короткий. Нужно хотя бы 3 символа.\n\n" +
+        "Пример: <code>/add_prompt weekday закат над горами, тёплый свет</code>",
+      env
+    );
+    return;
+  }
+
+  list.push(trimmed);
   await patchSettings(chatId, { [field]: list }, env);
+
+  const notes = [];
+
+  if (textValue.length > MAX_PROMPT_CHARS) {
+    notes.push(`✂️ Промпт обрезан до ${MAX_PROMPT_CHARS} символов.`);
+  }
+  if (needsTranslation(trimmed)) {
+    notes.push(
+      "🌐 Промпт на русском — переведу на английский перед генерацией.\n" +
+      "Модели понимают только английский, перевод кэшируется."
+    );
+  }
+
+  // ~1.3 токена на слово — грубая, но достаточная оценка для предупреждения
+  const words = trimmed.split(/\s+/).filter(Boolean).length;
+  if (Math.ceil(words * 1.3) > 70) {
+    notes.push(
+      `⚠️ Промпт длинный (~${words} слов). Модели на CLIP (SDXL, SD3, BRIA)\n` +
+      "читают только первые ~77 токенов, остальное отбросят.\n" +
+      "FLUX понимает длинные промпты — выберите его в /models."
+    );
+  }
 
   await sendMessage(
     chatId,
     `✅ Промпт добавлен в список ${kind === "weekend" ? "выходных" : "будней"} (всего ${list.length}).` +
-      (needsTranslation(textValue)
-        ? "\n\n<i>🌐 Промпт на русском — переведу на английский перед генерацией.\n" +
-          "Модели понимают только английский, перевод кэшируется.</i>"
-        : ""),
+      (notes.length ? "\n\n<i>" + notes.join("\n\n") + "</i>" : ""),
     env,
     { reply_markup: promptsKeyboard(kind, list.length) }
   );
