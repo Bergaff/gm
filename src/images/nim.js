@@ -412,8 +412,20 @@ export async function generateImage(prompt, env, options = {}) {
       ? [pinned]
       : [pinned, ...all.filter((p) => p.id !== pinned.id)];
   } else {
-    const offset = Math.floor(Math.random() * all.length);
-    queue = [...all.slice(offset), ...all.slice(0, offset)];
+    // ПРИОРИТЕТ: сначала бесплатный Cloudflare (в случайном порядке между
+    // своими моделями), и только если ВСЕ они не сработали — платные NVIDIA
+    // и добавленные провайдеры. Раньше очередь тасовалась целиком, и первым
+    // мог оказаться NVIDIA, зря тративший кредиты.
+    const cf = getCfProviders(env);
+    const rest = all.filter((p) => !p.binding);
+
+    const shuffle = (arr) => {
+      if (!arr.length) return [];
+      const off = Math.floor(Math.random() * arr.length);
+      return [...arr.slice(off), ...arr.slice(0, off)];
+    };
+
+    queue = [...shuffle(cf), ...shuffle(rest)];
   }
 
   const attempts = [];

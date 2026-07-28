@@ -53,7 +53,10 @@ export function voteKeyboard(postId, likes = 0, dislikes = 0) {
 }
 
 export async function sendMorning(chatId, settings, env, options = {}) {
-  const { test = false } = options;
+  // forcePrompt: /test заранее показывает промпт пользователю и передаёт
+  // его сюда. Без этого pickPrompt вызывался дважды и случайно выбирал
+  // РАЗНЫЕ промпты — в превью один, в генерации другой.
+  const { test = false, forcePrompt = null } = options;
 
   const now = localParts(settings.timezone);
 
@@ -95,7 +98,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   let error = null;
 
   // --- основной источник ---
-  const rawPrompt = pickPrompt(settings, now.isWeekend);
+  const rawPrompt = forcePrompt || pickPrompt(settings, now.isWeekend);
 
   // Модели генерации понимают только английский. Русский промпт переводим,
   // результат кэшируется — повторный перевод того же текста не нужен.
@@ -210,7 +213,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
   "/set_source", "/set_gdrive", "/refresh_gdrive",
-  "/prompts", "/set_prompt", "/add_prompt", "/del_prompt",
+  "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
   "/models", "/set_model", "/set_timezone",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
@@ -326,6 +329,7 @@ export function promptsKeyboard(kind, count) {
     { text: "➕ Добавить", callback_data: `p|add|${kind}` },
   ]];
   if (count > 0) {
+    rows[0].push({ text: "✏️ Изменить", callback_data: `p|editlist|${kind}` });
     rows[0].push({ text: "🗑 Удалить", callback_data: `p|dellist|${kind}` });
   }
   rows.push([
@@ -641,6 +645,45 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
+    case "/edit_prompt": {
+      const parts = value.split(/\s+/);
+      const kind = parts[0] === "weekend" ? "weekend" : "weekday";
+      const num = Number(parts[1]);
+      const newText = parts.slice(2).join(" ").trim();
+
+      if (!num) {
+        await sendMessage(
+          chatId,
+          "Использование: <code>/edit_prompt weekday 2 новый текст</code>\n\n" +
+            "Номера смотрите в /prompts. Можно и кнопкой «✏️ Изменить».",
+          env
+        );
+        return;
+      }
+      if (!newText) {
+        // текст не указан — спросим следующим сообщением
+        await setPending(chatId, userId, `edit_prompt_${kind}_${num - 1}`, env);
+        const st = await getSettings(chatId, env);
+        const cur = (kind === "weekend" ? st.weekendPrompts : st.weekdayPrompts)?.[num - 1];
+        if (!cur) {
+          await sendMessage(chatId, "Нет промпта с таким номером. Смотрите /prompts", env);
+          return;
+        }
+        await sendMessage(
+          chatId,
+          `✏️ Текущий текст промпта <b>${num}</b>:\n<code>${escapeHtml(cur)}</code>\n\n` +
+            "Пришлите новый текст следующим сообщением.\n\n<i>/cancel — отмена</i>",
+          env
+        );
+        return;
+      }
+      await editPrompt(kind, num - 1, newText, chatId, env);
+      return;
+    }
+
+
+
+
     case "/del_prompt": {
       const parts = value.split(/\s+/);
       const kind = parts[0] === "weekend" ? "weekend" : "weekday";
@@ -841,7 +884,7 @@ export async function handleCommand(message, env, options = {}) {
         env
       );
 
-      const result = await sendMorning(chatId, s, env, { test: true });
+      const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: preview });
 
       // Показываем, что реально сработало — видно, откуда взялись текст и картинка.
       const report = [
@@ -880,6 +923,12 @@ export async function handleCommand(message, env, options = {}) {
 
 // ── Применение отложенного ответа ──────────────────────────────────────
 async function applyPendingValue(pending, text, chatId, env) {
+  // edit_prompt_<kind>_<index> — редактирование конкретного промпта
+  const edit = /^edit_prompt_(weekday|weekend)_(\d+)$/.exec(pending.action || "");
+  if (edit) {
+    return editPrompt(edit[1], Number(edit[2]), text, chatId, env);
+  }
+
   switch (pending.action) {
     case "set_gdrive":
       return applyGdrive(text, chatId, env);
@@ -1079,6 +1128,44 @@ export async function addPrompt(kind, textValue, chatId, env) {
   );
 }
 
+export async function editPrompt(kind, index, newText, chatId, env) {
+  const s = await getSettings(chatId, env);
+  const field = kind === "weekend" ? "weekendPrompts" : "weekdayPrompts";
+  const list = [...(s[field] || [])];
+
+  if (index < 0 || index >= list.length) {
+    await sendMessage(chatId, "Нет промпта с таким номером. Смотрите /prompts", env);
+    return;
+  }
+
+  const trimmed = String(newText || "").trim().slice(0, 1500);
+  if (trimmed.length < 3) {
+    await sendMessage(chatId, "❌ Промпт слишком короткий. Нужно хотя бы 3 символа.", env);
+    return;
+  }
+
+  const was = list[index];
+  list[index] = trimmed;
+  await patchSettings(chatId, { [field]: list }, env);
+
+  await sendMessage(
+    chatId,
+    [
+      `✏️ Промпт <b>${index + 1}</b> изменён.`,
+      "",
+      `<s>${escapeHtml(String(was).slice(0, 150))}</s>`,
+      `<code>${escapeHtml(trimmed)}</code>`,
+    ].join("\n") +
+      (needsTranslation(trimmed)
+        ? "\n\n<i>🌐 Переведу на английский перед генерацией.</i>"
+        : ""),
+    env,
+    { reply_markup: promptsKeyboard(kind, list.length) }
+  );
+}
+
+
+
 export async function deletePrompt(kind, index, chatId, env) {
   const s = await getSettings(chatId, env);
   const field = kind === "weekend" ? "weekendPrompts" : "weekdayPrompts";
@@ -1125,6 +1212,7 @@ function helpText(role) {
     "/prompts — список для будней (кнопки)",
     "/prompts weekend — список для выходных",
     "/add_prompt weekday &lt;текст&gt;",
+    "/edit_prompt weekday &lt;номер&gt; &lt;текст&gt; — изменить",
     "/del_prompt weekday &lt;номер&gt;",
     "/set_prompt &lt;текст&gt; — общий запасной",
     "",

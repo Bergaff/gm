@@ -176,7 +176,25 @@ export async function generateCaption(env, options = {}) {
   const messages = buildPrompt(character, isWeekend, chatTitle);
   let lastError = null;
 
-  // Нет внешнего ключа, но есть Workers AI — генерируем бесплатно через него.
+  // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи
+  // (NVIDIA и прочие) — только если он недоступен или не справился.
+  // Отключить приоритет: секрет PREFER_EXTERNAL_TEXT = "1".
+  const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
+
+  if (preferCf) {
+    try {
+      const text = cleanup(await generateViaCfBinding(env, messages));
+      if (text) {
+        return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+                 latency: Date.now() - started };
+      }
+      lastError = "Workers AI вернул пустой ответ";
+    } catch (e) {
+      lastError = "Workers AI: " + String(e?.message || e).slice(0, 150);
+    }
+    // не получилось — идём во внешние ключи ниже
+  }
+
   if (!keys.length) {
     if (env.AI) {
       try {
@@ -320,10 +338,12 @@ export async function translatePrompt(prompt, env) {
 
   const keys = getTextApiKeys(env);
 
-  // Без внешнего ключа переводим бесплатно через Workers AI
-  if (!keys.length) {
+  // Приоритет — бесплатный Workers AI, внешние ключи запасные
+  const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
+
+  if (preferCf || !keys.length) {
     if (!env.AI) return { text: original, translated: false, error: "нет ключа для перевода" };
-    try {
+    try {// молча возвращаем оригинал ниже
       const out = await env.AI.run(CF_TEXT_MODEL, {
         messages: [
           { role: "system", content: "Translate the user's image prompt from Russian to English. Reply with the English prompt only." },
@@ -337,9 +357,11 @@ export async function translatePrompt(prompt, env) {
         return { text: t, translated: true, cached: false };
       }
     } catch {
-      // молча возвращаем оригинал ниже
+      // не вышло — если есть внешние ключи, пробуем их ниже
     }
-    return { text: original, translated: false, error: "Workers AI не перевёл" };
+    if (!keys.length) {
+      return { text: original, translated: false, error: "Workers AI не перевёл" };
+    }
   }
 
   try {

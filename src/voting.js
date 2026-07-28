@@ -9,6 +9,7 @@ import {
   promptsKeyboard,
   promptsText,
   deletePrompt,
+  editPrompt,
   settingsTextPublic,
 } from "./commands.js";
 import { getSettings, patchSettings } from "./storage.js";
@@ -152,6 +153,51 @@ export async function handleCallback(query, env) {
           promptsKeyboard(kind, (list || []).length)
         );
         await answerCallback(query.id, "", env);
+        return;
+      }
+
+
+      // Список для выбора промпта на редактирование
+      if (action === "editlist") {
+        const s = await getSettings(chatId, env);
+        const list = (kind === "weekend" ? s.weekendPrompts : s.weekdayPrompts) || [];
+
+        if (!list.length) {
+          await answerCallback(query.id, "Список пуст", env, true);
+          return;
+        }
+
+        const rows = list.map((p, i) => [{
+          text: `✏️ ${i + 1}. ${String(p).slice(0, 40)}`,
+          callback_data: `p|edit|${kind}|${i}`,
+        }]);
+        rows.push([{ text: "◀️ Назад", callback_data: `p|show|${kind}` }]);
+
+        await editMarkup(chatId, query.message.message_id, { inline_keyboard: rows }, env);
+        await answerCallback(query.id, "Выберите, что изменить", env);
+        return;
+      }
+
+      // Нажали конкретный промпт — ждём новый текст
+      if (action === "edit") {
+        const s = await getSettings(chatId, env);
+        const list = (kind === "weekend" ? s.weekendPrompts : s.weekdayPrompts) || [];
+        const idx = Number(extra);
+        const cur = list[idx];
+
+        if (!cur) {
+          await answerCallback(query.id, "Промпт не найден", env, true);
+          return;
+        }
+
+        await setPending(chatId, userId, `edit_prompt_${kind}_${idx}`, env);
+        await answerCallback(query.id, "Жду новый текст", env);
+        await sendMessage(
+          chatId,
+          `✏️ Текущий текст промпта <b>${idx + 1}</b>:\n<code>${cur}</code>\n\n` +
+            "Пришлите новый текст следующим сообщением.\n\n<i>/cancel — отмена</i>",
+          env
+        );
         return;
       }
 
