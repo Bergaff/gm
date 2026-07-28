@@ -1,4 +1,4 @@
-import { handleCommand } from "./commands.js";
+import { handleCommand, handleDocument } from "./commands.js";
 import { handleCallback } from "./voting.js";
 import { runScheduler } from "./scheduler.js";
 import { registerChat, removeChat } from "./storage.js";
@@ -55,6 +55,13 @@ async function route(update, env) {
 
     const message = update.message || update.channel_post;
     if (!message) return;
+
+    // .txt файл с описанием характера чата
+    if (message.document) {
+      const isChannelPost = Boolean(update.channel_post && !update.message);
+      return handleDocument(message, env, { isChannelPost });
+    }
+
 
     // ВАЖНО: пропускаем любой текст, а не только начинающийся с "/".
     // Иначе ответ на вопрос бота ("пришлите ссылку") молча терялся.

@@ -3,7 +3,7 @@ import {
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
 } from "./config.js";
-import { sendMessage, sendPhotoBytes, escapeHtml } from "./telegram.js";
+import { sendMessage, sendPhotoBytes, escapeHtml, tg } from "./telegram.js";
 import { getSettings, patchSettings, registerChat } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
@@ -168,9 +168,17 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     error,
   });
 
-  return { postId, status, provider: image?.provider, error };
+  return {
+    postId,
+    status,
+    provider: image?.provider,
+    error,
+    prompt: useNim ? activePrompt : null,
+    captionSource,
+    caption: text,
+    assetName: image?.assetName || null,
+  };
 }
-
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
   "/set_source", "/set_gdrive", "/refresh_gdrive",
@@ -179,6 +187,7 @@ const KNOWN_COMMANDS = new Set([
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
   "/test", "/reset", "/cancel", "/diag", "/menu",
+  "/set_character", "/ai_on", "/ai_off",
   "/grant", "/revoke", "/access",
   "/stats", "/stats_models", "/stats_chats", "/stats_recent",
   "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv",
@@ -318,6 +327,64 @@ export function promptsText(settings, kind) {
 
   return lines.join("\n");
 }
+
+
+// Пользователь прислал .txt — читаем как «характер чата».
+export async function handleDocument(message, env, options = {}) {
+  const { isChannelPost = false } = options;
+  const chatId = String(message.chat.id);
+  const userId = message.from?.id;
+  const doc = message.document;
+
+  const name = String(doc.file_name || "");
+  if (!/\.txt$/i.test(name) && doc.mime_type !== "text/plain") return;
+
+  const role = await getRole(chatId, userId, env, { isChannelPost });
+  if (!canEdit(role)) return;
+
+  if (doc.file_size > 100 * 1024) {
+    await sendMessage(chatId, "Файл слишком большой. Нужен .txt до 100 КБ.", env);
+    return;
+  }
+
+  const info = await tg("getFile", { file_id: doc.file_id }, env);
+  if (!info.ok) {
+    await sendMessage(chatId, "Не удалось получить файл из Telegram.", env);
+    return;
+  }
+
+  const url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${info.result.file_path}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    await sendMessage(chatId, "Не удалось скачать файл.", env);
+    return;
+  }
+
+  const content = (await response.text()).trim();
+  if (!content) {
+    await sendMessage(chatId, "Файл пустой.", env);
+    return;
+  }
+
+  await patchSettings(chatId, { character: content.slice(0, 2000) }, env);
+  if (userId) await clearPending(chatId, userId, env);
+
+  await sendMessage(
+    chatId,
+    [
+      `✅ Характер чата загружен из <code>${escapeHtml(name)}</code>`,
+      `Символов: <b>${Math.min(content.length, 2000)}</b>`,
+      "",
+      `<i>${escapeHtml(content.slice(0, 200))}${content.length > 200 ? "…" : ""}</i>`,
+      "",
+      "Включить генерацию подписей: /ai_on",
+    ].join("\n"),
+    env
+  );
+}
+
+
+
 
 export async function handleCommand(message, env, options = {}) {
   const { isChannelPost = false } = options;
@@ -464,6 +531,11 @@ export async function handleCommand(message, env, options = {}) {
     return;
   }
 
+  if (command === "/diag") {
+    await runDiagnostics(chatId, env);
+    return;
+  }
+
   switch (command) {
     case "/set_source": {
       if (!value) {
@@ -598,6 +670,47 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
+    case "/set_character": {
+      if (!value) {
+        await setPending(chatId, userId, "set_character", env);
+        const cur = (await getSettings(chatId, env)).character;
+        await sendMessage(
+          chatId,
+          [
+            "🎭 <b>Характер чата</b>",
+            "",
+            cur ? `Сейчас: <i>${escapeHtml(cur.slice(0, 300))}</i>` : "<i>Пока не задан.</i>",
+            "",
+            "Пришлите описание следующим сообщением — или отправьте .txt файлом.",
+            "",
+            "<i>Например: «Чат разработчиков, много шуток про дедлайны, неформальный тон».</i>",
+            "",
+            "<i>/cancel — отмена</i>",
+          ].join("\n"),
+          env
+        );
+        return;
+      }
+      await patchSettings(chatId, { character: value.slice(0, 2000) }, env);
+      await sendMessage(chatId, "✅ Характер чата сохранён.\n\nВключить генерацию подписей: /ai_on", env);
+      return;
+    }
+
+    case "/ai_on":
+    case "/ai_off": {
+      const on = command === "/ai_on";
+      await patchSettings(chatId, { aiCaptions: on }, env);
+      await sendMessage(
+        chatId,
+        on
+          ? "✅ Подписи будет писать нейросеть под характер чата.\n\nПроверить: /test"
+          : "⛔ Подписи снова берутся из готовых фраз.",
+        env
+      );
+      return;
+    }
+
+
     case "/set_model": {
       if (!value) {
         const s = await getSettings(chatId, env);
@@ -673,15 +786,38 @@ export async function handleCommand(message, env, options = {}) {
 
     case "/test": {
       const s = await getSettings(chatId, env);
-      await sendMessage(chatId, "⏳ Готовлю картинку…", env);
+
+      const willUseNim =
+        s.source === "nim" || (s.source === "mixed" && true);
+      const preview = pickPrompt(s, localParts(s.timezone).isWeekend);
+
+      await sendMessage(
+        chatId,
+        [
+          "⏳ Готовлю…",
+          "",
+          `Источник: <b>${s.source}</b>`,
+          willUseNim
+            ? `Промпт: <i>${escapeHtml(String(preview).slice(0, 150))}</i>`
+            : "Картинка: случайная из Google Drive",
+          `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
+        ].join("\n"),
+        env
+      );
+
       const result = await sendMorning(chatId, s, env, { test: true });
-      if (result.status !== "ok") {
-        await sendMessage(
-          chatId,
-          `⚠️ Статус: <code>${result.status}</code>\n<code>${escapeHtml(String(result.error).slice(0, 400))}</code>`,
-          env
-        );
-      }
+
+      // Показываем, что реально сработало — видно, откуда взялись текст и картинка.
+      const report = [
+        `Статус: <code>${result.status}</code>`,
+        result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
+        result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
+        result.prompt ? `Промпт: <i>${escapeHtml(String(result.prompt).slice(0, 150))}</i>` : null,
+        `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
+        result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
+      ].filter(Boolean).join("\n");
+
+      await sendMessage(chatId, (result.status === "ok" ? "✅ " : "⚠️ ") + report, env);
       return;
     }
 
@@ -710,6 +846,17 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "add_prompt_weekend":
       return addPrompt("weekend", text, chatId, env);
 
+
+    case "set_character": {
+      await patchSettings(chatId, { character: text.slice(0, 2000) }, env);
+      await sendMessage(
+        chatId,
+        "✅ Характер чата сохранён.\n\nВключить генерацию подписей нейросетью: /ai_on",
+        env
+      );
+      return;
+    }
+
     case "set_weekday_time":
     case "set_weekend_time": {
       const field = pending.action === "set_weekday_time" ? "weekdayTime" : "weekendTime";
@@ -723,6 +870,68 @@ async function applyPendingValue(pending, text, chatId, env) {
     }
   }
 }
+
+
+// Проверяет всё, что нужно для работы, и показывает что именно сломано.
+async function runDiagnostics(chatId, env) {
+  const s = await getSettings(chatId, env);
+  const lines = ["🩺 <b>Диагностика этого чата</b>", ""];
+
+  // --- секреты ---
+  lines.push("<b>Ключи</b>");
+  lines.push(`${env.BOT_TOKEN ? "✅" : "❌"} BOT_TOKEN`);
+  lines.push(`${env.GOOGLE_API_KEY ? "✅" : "❌"} GOOGLE_API_KEY`);
+
+  const imgKeys = getApiKeys(env);
+  lines.push(`${imgKeys.length ? "✅" : "❌"} NVIDIA картинки: ключей ${imgKeys.length}`);
+
+  const txtKeys = getTextApiKeys(env);
+  if (hasDedicatedTextKey(env)) {
+    lines.push(`✅ NVIDIA текст: ключей ${txtKeys.length}`);
+  } else if (txtKeys.length) {
+    lines.push("⚠️ NVIDIA текст: отдельного ключа нет, используются ключи картинок");
+  } else {
+    lines.push("❌ NVIDIA текст: ключа нет (NVIDIA_TEXT_API_KEY)");
+  }
+  lines.push(`Модель текста: <code>${escapeHtml(getTextModel(env))}</code>`);
+  lines.push("");
+
+  // --- Google Drive ---
+  lines.push("<b>Google Drive</b>");
+  const folderId = parseFolderId(s.gdriveFolder);
+  if (!folderId) {
+    lines.push("➖ папка не задана (/set_gdrive)");
+  } else {
+    lines.push(`папка: <code>${escapeHtml(folderId)}</code>`);
+    try {
+      const files = await listImages(folderId, env, true);
+      lines.push(`✅ доступна, изображений: <b>${files.length}</b>`);
+      if (!files.length) lines.push("⚠️ в папке нет картинок");
+    } catch (e) {
+      lines.push(`❌ ${escapeHtml(String(e.message || e).slice(0, 300))}`);
+    }
+  }
+  lines.push("");
+
+  // --- промпты ---
+  lines.push("<b>Промпты</b>");
+  lines.push(`будни: ${(s.weekdayPrompts || []).length}, выходные: ${(s.weekendPrompts || []).length}`);
+  lines.push("");
+
+  lines.push("<b>Подписи</b>");
+  lines.push(s.aiCaptions ? "🤖 генерирует нейросеть" : "📄 готовые фразы (/ai_on — включить ИИ)");
+  lines.push(s.character ? `характер задан (${s.character.length} симв.)` : "характер не задан (/set_character)");
+  lines.push("");
+
+  lines.push("<b>Расписание</b>");
+  lines.push(`${s.enabled ? "✅ включено" : "⛔ выключено"} · ${s.weekdayTime} / ${s.weekendTime} · ${s.timezone}`);
+  lines.push(`источник: <b>${s.source}</b>`);
+
+  await sendMessage(chatId, lines.join("\n"), env);
+}
+
+
+
 
 async function applyGdrive(value, chatId, env) {
   const folderId = parseFolderId(value);
@@ -823,6 +1032,10 @@ function helpText(role) {
     "/del_prompt weekday &lt;номер&gt;",
     "/set_prompt &lt;текст&gt; — общий запасной",
     "",
+    "<b>Подписи к картинкам</b>",
+    "/set_character — характер чата (текстом или .txt файлом)",
+    "/ai_on, /ai_off — писать подписи нейросетью",
+    "",
     "<b>Модели и расписание</b>",
     "/models — выбор модели (кнопки)",
     "/set_timezone Europe/Moscow",
@@ -835,6 +1048,7 @@ function helpText(role) {
     "/test — отправить прямо сейчас",
     "/reset — сброс настроек чата",
     "/id — узнать ID чата и свой",
+    "/diag — проверить, что настроено и что сломано",
     "",
     "<b>Доступ</b>",
     "/access — кто может настраивать",

@@ -18,7 +18,58 @@ export function parseFolderId(input) {
   return null;
 }
 
+
+// Google на разные проблемы отвечает одинаково невнятно.
+// Переводим ответ в конкретную причину и подсказку.
+function explainDriveError(status, body) {
+  const text = String(body);
+
+  if (/API key not valid/i.test(text)) {
+    return (
+      "ключ Google недействителен.\n\n" +
+      "Проверьте: ключ скопирован полностью (начинается с AIza, без пробелов) " +
+      "и добавлен в секрет GOOGLE_API_KEY воркера."
+    );
+  }
+  if (/has not been used in project|SERVICE_DISABLED|accessNotConfigured/i.test(text)) {
+    return (
+      "в проекте Google Cloud не включён Drive API.\n\n" +
+      "Откройте console.cloud.google.com → APIs & Services → Library → " +
+      "Google Drive API → Enable. После включения подождите пару минут."
+    );
+  }
+  if (/API_KEY_HTTP_REFERRER|API_KEY_ANDROID|API_KEY_IOS|requests from referer/i.test(text)) {
+    return (
+      "у ключа стоят ограничения по источнику (HTTP referrer / приложение).\n\n" +
+      "Cloudflare Worker обращается с сервера. В настройках ключа выберите " +
+      "Application restrictions → None."
+    );
+  }
+  if (status === 403 && /rateLimitExceeded|quotaExceeded/i.test(text)) {
+    return "превышена квота Google Drive API. Подождите и попробуйте снова.";
+  }
+  if (status === 404) {
+    return "папка не найдена. Проверьте ссылку.";
+  }
+  if (status === 403) {
+    return (
+      "нет доступа к папке.\n\n" +
+      "Откройте папку → Поделиться → Все, у кого есть ссылка → Читатель."
+    );
+  }
+  return text.slice(0, 200);
+}
+
+
+
 export async function listImages(folderId, env, force = false) {
+  if (!env.GOOGLE_API_KEY) {
+    throw new Error(
+      "не задан секрет GOOGLE_API_KEY.\n\n" +
+      "Workers & Pages → gm → Settings → Variables and Secrets → Add (тип Secret)."
+    );
+  }
+
   const cacheKey = `gdrive:${folderId}`;
 
   if (!force) {
@@ -45,7 +96,7 @@ export async function listImages(folderId, env, force = false) {
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Google Drive API ${response.status}: ${body.slice(0, 200)}`);
+    throw new Error(explainDriveError(response.status, body));
   }
 
   const data = await response.json();
@@ -96,7 +147,7 @@ export async function downloadImage(fileId, env) {
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Drive download ${response.status}: ${body.slice(0, 200)}`);
+    throw new Error("скачивание файла: " + explainDriveError(response.status, body));
   }
 
   return new Uint8Array(await response.arrayBuffer());
