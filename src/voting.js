@@ -14,7 +14,7 @@ import {
 import { getSettings, patchSettings } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
 import { setPending } from "./pending.js";
-import { NIM_PROVIDERS, getApiKeys } from "./images/nim.js";
+import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
 
 export async function handleCallback(query, env) {
   const data = query.data || "";
@@ -73,9 +73,9 @@ export async function handleCallback(query, env) {
       try { stats = await votesByProvider(env, chatId); } catch { stats = {}; }
       await editMessage(
         chatId, mid,
-        modelsText(NIM_PROVIDERS, s.nimModel, stats, getApiKeys(env).length),
+        modelsText(getAllProviders(env), s.nimModel, stats, getApiKeys(env).length),
         env,
-        modelsKeyboard(NIM_PROVIDERS, s.nimModel, stats)
+        modelsKeyboard(getAllProviders(env), s.nimModel, stats)
       );
     } else if (screen === "settings") {
       await editMessage(chatId, mid, settingsTextPublic(s, chatId, role), env, {
@@ -116,11 +116,11 @@ export async function handleCallback(query, env) {
         try { stats = await votesByProvider(env, chatId); } catch { stats = {}; }
         await editMessage(
           chatId, query.message.message_id,
-          modelsText(NIM_PROVIDERS, value, stats, getApiKeys(env).length),
+          modelsText(getAllProviders(env), value, stats, getApiKeys(env).length),
           env,
-          modelsKeyboard(NIM_PROVIDERS, value, stats)
+          modelsKeyboard(getAllProviders(env), value, stats)
         );
-        const idx = NIM_PROVIDERS.findIndex((p) => p.id === value);
+        const idx = getAllProviders(env).findIndex((p) => p.id === value);
         await answerCallback(query.id, idx >= 0 ? `Модель ${idx + 1}` : "Авто", env);
         return;
       }

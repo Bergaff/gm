@@ -4,12 +4,21 @@
 
 import { getApiKeys } from "./images/nim.js";
 
-const LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const TIMEOUT_MS = 12000; // укладываемся в лимит waitUntil (30 сек на всё)
 
-// Модель текста по умолчанию. Меняется секретом NVIDIA_TEXT_MODEL
-// без правки кода — например на meta/llama-3.3-70b-instruct.
+// По умолчанию — NVIDIA. Оба значения меняются секретами, БЕЗ правки кода:
+//   TEXT_API_URL    — адрес любого OpenAI-совместимого сервиса
+//   NVIDIA_TEXT_MODEL — название модели у выбранного сервиса
+//
+// Формат запроса OpenAI chat/completions поддерживают: OpenAI, Groq,
+// Together, DeepSeek, OpenRouter, Mistral, LM Studio, Ollama и другие.
+// Достаточно поменять URL + ключ + модель.
+const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const DEFAULT_LLM_MODEL = "meta/llama-3.1-8b-instruct";
+
+export function getTextUrl(env) {
+  return String(env.TEXT_API_URL || DEFAULT_LLM_URL).trim();
+}
 
 /**
  * Ключи для ГЕНЕРАЦИИ ТЕКСТА — отдельные от ключей для картинок.
@@ -26,6 +35,19 @@ const DEFAULT_LLM_MODEL = "meta/llama-3.1-8b-instruct";
  */
 export function getTextApiKeys(env) {
   const keys = [];
+
+  // Нейтральные имена — если провайдер не NVIDIA
+  if (env.TEXT_API_KEYS) {
+    for (const part of String(env.TEXT_API_KEYS).split(/[,\s]+/)) {
+      const k = part.trim();
+      if (k) keys.push(k);
+    }
+  }
+  if (env.TEXT_API_KEY) keys.push(String(env.TEXT_API_KEY).trim());
+  for (let i = 1; i <= 9; i++) {
+    const k = env[`TEXT_API_KEY_${i}`];
+    if (k) keys.push(String(k).trim());
+  }
 
   if (env.NVIDIA_TEXT_API_KEYS) {
     for (const part of String(env.NVIDIA_TEXT_API_KEYS).split(/[,\s]+/)) {
@@ -50,14 +72,17 @@ export function getTextApiKeys(env) {
 // Задан ли отдельный ключ под текст (для /diag)
 export function hasDedicatedTextKey(env) {
   return Boolean(
-    env.NVIDIA_TEXT_API_KEY ||
+    env.TEXT_API_KEY ||
+      env.TEXT_API_KEYS ||
+      env.TEXT_API_KEY_1 ||
+      env.NVIDIA_TEXT_API_KEY ||
       env.NVIDIA_TEXT_API_KEYS ||
       env.NVIDIA_TEXT_API_KEY_1
   );
 }
 
 export function getTextModel(env) {
-  return String(env.NVIDIA_TEXT_MODEL || DEFAULT_LLM_MODEL).trim();
+  return String(env.TEXT_API_MODEL || env.NVIDIA_TEXT_MODEL || DEFAULT_LLM_MODEL).trim();
 }
 
 export const DEFAULT_CHARACTER =
@@ -124,7 +149,7 @@ export async function generateCaption(env, options = {}) {
 
   for (let i = 0; i < Math.min(keys.length, 2); i++) {
     try {
-      const response = await fetch(LLM_URL, {
+      const response = await fetch(getTextUrl(env), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${keys[i]}`,

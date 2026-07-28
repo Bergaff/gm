@@ -1,5 +1,5 @@
 import { sendMessage, sendDocumentBytes, tg, escapeHtml } from "./telegram.js";
-import { NIM_PROVIDERS, generateImage } from "./images/nim.js";
+import { NIM_PROVIDERS, generateImage, getAllProviders } from "./images/nim.js";
 import { getPost } from "./db.js";
 import { listChats, getSettings } from "./storage.js";
 
@@ -240,7 +240,7 @@ async function health(chatId, env) {
   // Последовательный перебор 5 моделей по 10 сек уже не укладывался,
   // и воркер убивали до отправки результата.
   const checks = await Promise.all(
-    NIM_PROVIDERS.map(async (provider) => {
+    getAllProviders(env).map(async (provider) => {
       const started = Date.now();
       try {
         const result = await generateImage(prompt, env, {

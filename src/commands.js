@@ -8,7 +8,14 @@ import { getSettings, patchSettings, registerChat } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
 import { parseFolderId, getGdriveImage, listImages } from "./images/gdrive.js";
-import { generateImage, NIM_PROVIDERS, getProvider, getApiKeys } from "./images/nim.js";
+import {
+  generateImage,
+  NIM_PROVIDERS,
+  getProvider,
+  getApiKeys,
+  getAllProviders,
+  getCustomProviders,
+} from "./images/nim.js";
 import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
 import { localParts, parseTimeSpec } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
@@ -646,6 +653,7 @@ export async function handleCommand(message, env, options = {}) {
     case "/models": {
       const s = await getSettings(chatId, env);
       const keyCount = getApiKeys(env).length;
+      const providers = getAllProviders(env); // NVIDIA + свои из IMAGE_PROVIDERS_JSON
 
       let stats = {};
       try {
@@ -656,9 +664,9 @@ export async function handleCommand(message, env, options = {}) {
 
       await sendMessage(
         chatId,
-        modelsText(NIM_PROVIDERS, s.nimModel, stats, keyCount),
+        modelsText(providers, s.nimModel, stats, keyCount),
         env,
-        { reply_markup: modelsKeyboard(NIM_PROVIDERS, s.nimModel, stats) }
+        { reply_markup: modelsKeyboard(providers, s.nimModel, stats) }
       );
       return;
     }
@@ -715,11 +723,11 @@ export async function handleCommand(message, env, options = {}) {
       if (!value) {
         const s = await getSettings(chatId, env);
         await sendMessage(chatId, "Выберите модель:", env, {
-          reply_markup: modelsKeyboard(NIM_PROVIDERS, s.nimModel),
+          reply_markup: modelsKeyboard(getAllProviders(env), s.nimModel),
         });
         return;
       }
-      if (value !== "auto" && !getProvider(value)) {
+      if (value !== "auto" && !getProvider(value, env)) {
         await sendMessage(chatId, "Неизвестная модель. Список: /models", env);
         return;
       }
@@ -894,6 +902,16 @@ async function runDiagnostics(chatId, env) {
     lines.push("❌ NVIDIA текст: ключа нет (NVIDIA_TEXT_API_KEY)");
   }
   lines.push(`Модель текста: <code>${escapeHtml(getTextModel(env))}</code>`);
+
+  const custom = getCustomProviders(env);
+  if (custom.length) {
+    lines.push(`✅ Свои провайдеры картинок: ${custom.length}`);
+    for (const c of custom) {
+      const hasKey = !c.keyEnv || Boolean(env[c.keyEnv]);
+      lines.push(`   ${hasKey ? "✅" : "❌"} ${escapeHtml(c.title)}` +
+        (c.keyEnv ? ` (ключ ${escapeHtml(c.keyEnv)})` : ""));
+    }
+  }
   lines.push("");
 
   // --- Google Drive ---

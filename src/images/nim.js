@@ -103,8 +103,79 @@ export const NIM_PROVIDERS = [
   },
 ];
 
-export function getProvider(id) {
-  return NIM_PROVIDERS.find((p) => p.id === id) || null;
+/**
+ * ДОПОЛНИТЕЛЬНЫЕ провайдеры картинок — задаются секретом IMAGE_PROVIDERS_JSON,
+ * без правки этого файла. Встроенные модели NVIDIA выше остаются на месте.
+ *
+ * Формат секрета — JSON-массив:
+ * [
+ *   {
+ *     "id": "sdxl-hf",
+ *     "title": "SDXL (HuggingFace)",
+ *     "url": "https://api-inference.huggingface.co/models/stabilityai/...",
+ *     "keyEnv": "HF_API_KEY",
+ *     "format": "raw",
+ *     "body": { "inputs": "{prompt}" }
+ *   }
+ * ]
+ *
+ * Поля:
+ *   id, title  — как показывать в /models
+ *   url        — endpoint
+ *   keyEnv     — ИМЯ переменной с ключом (не сам ключ!)
+ *   authHeader — "bearer" (по умолчанию) | "x-api-key" | "none"
+ *   format     — "json" (по умолчанию, ищем base64/url в ответе) | "raw" (тело = сами байты)
+ *   body       — шаблон тела запроса; {prompt} и {seed} подставляются
+ */
+export function getCustomProviders(env) {
+  const raw = env.IMAGE_PROVIDERS_JSON;
+  if (!raw) return [];
+
+  let parsed;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    return []; // битый JSON не должен ронять бота
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed
+    .filter((p) => p && p.id && p.url)
+    .map((p) => ({
+      id: String(p.id),
+      title: String(p.title || p.id),
+      url: String(p.url),
+      keyEnv: p.keyEnv ? String(p.keyEnv) : null,
+      authHeader: String(p.authHeader || "bearer").toLowerCase(),
+      format: String(p.format || "json").toLowerCase(),
+      custom: true,
+      build: (prompt, seed) => fillTemplate(p.body ?? { prompt: "{prompt}" }, prompt, seed),
+    }));
+}
+
+// Подставляет {prompt} и {seed} в шаблон тела запроса.
+function fillTemplate(node, prompt, seed) {
+  if (typeof node === "string") {
+    if (node === "{seed}") return seed;
+    return node.replace(/\{prompt\}/g, prompt).replace(/\{seed\}/g, String(seed));
+  }
+  if (Array.isArray(node)) return node.map((x) => fillTemplate(x, prompt, seed));
+  if (node && typeof node === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = fillTemplate(v, prompt, seed);
+    return out;
+  }
+  return node;
+}
+
+// Встроенные NVIDIA + добавленные пользователем
+export function getAllProviders(env) {
+  return [...NIM_PROVIDERS, ...getCustomProviders(env)];
+}
+
+export function getProvider(id, env = null) {
+  const list = env ? getAllProviders(env) : NIM_PROVIDERS;
+  return list.find((p) => p.id === id) || null;
 }
 
 function extractBase64(payload) {
@@ -154,18 +225,42 @@ async function callProvider(provider, prompt, env, apiKey) {
   const seed = Math.floor(Math.random() * 2 ** 31);
   const started = Date.now();
 
+  // У своего провайдера — свой ключ (имя переменной задано в keyEnv)
+  // и свой способ авторизации.
+  const key = provider.custom && provider.keyEnv ? env[provider.keyEnv] : apiKey;
+
+  const headers = { Accept: "application/json", "Content-Type": "application/json" };
+  if (provider.custom && provider.authHeader === "x-api-key") {
+    headers["x-api-key"] = key;
+  } else if (provider.custom && provider.authHeader === "none") {
+    // без авторизации
+  } else {
+    headers.Authorization = `Bearer ${key}`;
+  }
+
   const response = await fetch(provider.url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify(provider.build(prompt, seed)),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
 
   const latency = Date.now() - started;
+
+  // format: "raw" — сервис отдаёт сами байты картинки, а не JSON
+  if (provider.custom && provider.format === "raw") {
+    if (!response.ok) {
+      const body = await response.text();
+      return { ok: false, status: response.status, latency, error: body.slice(0, 300) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      latency,
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      seed,
+    };
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -219,27 +314,33 @@ export async function generateImage(prompt, env, options = {}) {
   const { preferred = "auto", chatId = null, noFallback = false } = options;
 
   const keys = getApiKeys(env);
-  if (!keys.length) {
+  const hasCustom = getCustomProviders(env).length > 0;
+
+  // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
+  if (!keys.length && !hasCustom) {
     return {
       ok: false,
       attempts: [{ provider: "-", ok: false, status: 0, latency: 0,
-                   error: "Не задан ни один ключ NVIDIA (NVIDIA_API_KEY)" }],
+                   error: "Не задан ни один ключ (NVIDIA_API_KEY или IMAGE_PROVIDERS_JSON)" }],
     };
   }
-  let keyIndex = await pickKeyIndex(keys, env);
+  let keyIndex = keys.length ? await pickKeyIndex(keys, env) : 0;
+
+  // Встроенные NVIDIA + добавленные секретом IMAGE_PROVIDERS_JSON
+  const all = getAllProviders(env);
 
   let queue;
 
-  if (preferred !== "auto" && getProvider(preferred)) {
-    const pinned = getProvider(preferred);
+  if (preferred !== "auto" && getProvider(preferred, env)) {
+    const pinned = getProvider(preferred, env);
     // noFallback: только запрошенная модель (нужно для /nim_health,
-    // иначе 7 моделей x 7 попыток = до 49 субреквестов при лимите 50).
+    // иначе перебор всех моделей упирается в лимит субреквестов).
     queue = noFallback
       ? [pinned]
-      : [pinned, ...NIM_PROVIDERS.filter((p) => p.id !== pinned.id)];
+      : [pinned, ...all.filter((p) => p.id !== pinned.id)];
   } else {
-    const offset = Math.floor(Math.random() * NIM_PROVIDERS.length);
-    queue = [...NIM_PROVIDERS.slice(offset), ...NIM_PROVIDERS.slice(0, offset)];
+    const offset = Math.floor(Math.random() * all.length);
+    queue = [...all.slice(offset), ...all.slice(0, offset)];
   }
 
   const attempts = [];
@@ -256,10 +357,10 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex]);
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null);
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
-      if (!result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
+      if (!provider.custom && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
         await markKeyFailed(keyIndex, env, result.status);
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
