@@ -25,6 +25,8 @@ import {
   getTextApiKeys,
   hasDedicatedTextKey,
   getTextModel,
+  translatePrompt,
+  needsTranslation,
 } from "./caption.js";
 
 function pick(list) {
@@ -88,7 +90,18 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   let error = null;
 
   // --- основной источник ---
-  const activePrompt = pickPrompt(settings, now.isWeekend);
+  const rawPrompt = pickPrompt(settings, now.isWeekend);
+
+  // Модели генерации понимают только английский. Русский промпт переводим,
+  // результат кэшируется — повторный перевод того же текста не нужен.
+  let activePrompt = rawPrompt;
+  let promptTranslated = false;
+
+  if (useNim && needsTranslation(rawPrompt)) {
+    const tr = await translatePrompt(rawPrompt, env);
+    activePrompt = tr.text;
+    promptTranslated = tr.translated;
+  }
 
   if (useNim) {
     const result = await generateImage(activePrompt, env, {
@@ -181,6 +194,8 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     provider: image?.provider,
     error,
     prompt: useNim ? activePrompt : null,
+    promptOriginal: useNim && promptTranslated ? rawPrompt : null,
+    promptTranslated,
     captionSource,
     caption: text,
     assetName: image?.assetName || null,
@@ -806,7 +821,8 @@ export async function handleCommand(message, env, options = {}) {
           "",
           `Источник: <b>${s.source}</b>`,
           willUseNim
-            ? `Промпт: <i>${escapeHtml(String(preview).slice(0, 150))}</i>`
+            ? `Промпт: <i>${escapeHtml(String(preview).slice(0, 150))}</i>` +
+              (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
             : "Картинка: случайная из Google Drive",
           `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
         ].join("\n"),
@@ -820,7 +836,12 @@ export async function handleCommand(message, env, options = {}) {
         `Статус: <code>${result.status}</code>`,
         result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
         result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
-        result.prompt ? `Промпт: <i>${escapeHtml(String(result.prompt).slice(0, 150))}</i>` : null,
+        result.promptOriginal
+          ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal).slice(0, 100))}</i>`
+          : null,
+        result.prompt
+          ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt).slice(0, 150))}</i>`
+          : null,
         `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
         result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
       ].filter(Boolean).join("\n");
@@ -995,7 +1016,11 @@ export async function addPrompt(kind, textValue, chatId, env) {
 
   await sendMessage(
     chatId,
-    `✅ Промпт добавлен в список ${kind === "weekend" ? "выходных" : "будней"} (всего ${list.length}).`,
+    `✅ Промпт добавлен в список ${kind === "weekend" ? "выходных" : "будней"} (всего ${list.length}).` +
+      (needsTranslation(textValue)
+        ? "\n\n<i>🌐 Промпт на русском — переведу на английский перед генерацией.\n" +
+          "Модели понимают только английский, перевод кэшируется.</i>"
+        : ""),
     env,
     { reply_markup: promptsKeyboard(kind, list.length) }
   );

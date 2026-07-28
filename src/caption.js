@@ -200,3 +200,124 @@ export async function generateCaption(env, options = {}) {
 
   return { ok: false, error: "все ключи не сработали", latency: Date.now() - started };
 }
+
+
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Перевод промпта на английский.
+//
+// Модели генерации картинок (CLIP/T5) обучены почти только на английском.
+// Русский текст они не понимают — выдают случайный результат.
+// Поэтому промпт с кириллицей переводим перед отправкой.
+//
+// Перевод КЭШИРУЕТСЯ в KV навсегда: один и тот же промпт из библиотеки
+// переводится один раз, дальше берётся готовый. Это важно, потому что
+// у Cloudflare всего 30 секунд на весь запрос.
+// ─────────────────────────────────────────────────────────────────────
+
+const TRANSLATE_TIMEOUT_MS = 8000;
+
+// Есть ли в тексте кириллица (быстрая проверка, без запросов)
+export function needsTranslation(text) {
+  return /[\u0400-\u04FF]/.test(String(text || ""));
+}
+
+// Короткий стабильный ключ кэша по тексту
+function cacheKeyFor(text) {
+  let h = 2166136261;
+  const str = String(text);
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `tr:${(h >>> 0).toString(36)}:${str.length}`;
+}
+
+/**
+ * Переводит промпт на английский, если в нём есть кириллица.
+ * Английский текст возвращается как есть — без единого запроса.
+ *
+ * Возвращает { text, translated, cached, error }.
+ * При любой ошибке возвращает исходный текст: генерация не должна падать
+ * из-за проблем с переводом.
+ */
+export async function translatePrompt(prompt, env) {
+  const original = String(prompt || "").trim();
+
+  if (!original) return { text: original, translated: false };
+  if (!needsTranslation(original)) return { text: original, translated: false };
+
+  const key = cacheKeyFor(original);
+
+  // 1. Готовый перевод из кэша — мгновенно, без запроса к API
+  try {
+    const cached = await env.BOT_KV.get(key);
+    if (cached) return { text: cached, translated: true, cached: true };
+  } catch {
+    // кэш недоступен — не страшно, переведём заново
+  }
+
+  const keys = getTextApiKeys(env);
+  if (!keys.length) {
+    return { text: original, translated: false, error: "нет ключа для перевода" };
+  }
+
+  try {
+    const response = await fetch(getTextUrl(env), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${keys[0]}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        model: getTextModel(env),
+        messages: [
+          {
+            role: "system",
+            content:
+              "You translate image-generation prompts from Russian to English. " +
+              "Rules:\n" +
+              "1. Output ONLY the English prompt, nothing else.\n" +
+              "2. Keep it as a comma-separated visual description.\n" +
+              "3. Preserve all details: objects, colors, lighting, style, mood.\n" +
+              "4. Do not add explanations, quotes or commentary.\n" +
+              "5. If the text is already English, return it unchanged.",
+          },
+          { role: "user", content: original },
+        ],
+        temperature: 0.2,
+        max_tokens: 200,
+      }),
+      signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return { text: original, translated: false, error: `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    let out = String(data?.choices?.[0]?.message?.content || "").trim();
+
+    out = out.replace(/^["«„']+|["»“']+$/g, "").trim();
+    out = out.replace(/[*_`#]/g, "");
+    out = out.split(/\n{2,}/)[0].trim();
+
+    // Перевод не удался — в ответе всё ещё кириллица
+    if (!out || needsTranslation(out)) {
+      return { text: original, translated: false, error: "модель не перевела" };
+    }
+
+    // Кладём в кэш на 90 дней
+    try {
+      await env.BOT_KV.put(key, out, { expirationTtl: 90 * 24 * 60 * 60 });
+    } catch {
+      // не критично
+    }
+
+    return { text: out, translated: true, cached: false };
+  } catch (e) {
+    return { text: original, translated: false, error: String(e).slice(0, 100) };
+  }
+}
