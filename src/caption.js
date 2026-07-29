@@ -119,7 +119,26 @@ export function getTextModel(env) {
 export const DEFAULT_CHARACTER =
   "Дружелюбный рабочий чат. Нейтральный тон, лёгкий позитив, без официоза.";
 
-function buildPrompt(character, isWeekend, chatTitle) {
+// Блок с примерами для промпта.
+// Формулировка важна: без явного запрета модель просто копирует
+// первый пример дословно.
+function exampleBlock(examples) {
+  if (!Array.isArray(examples) || !examples.length) return "";
+
+  const list = examples.map((e) => "— " + e).join("\n");
+
+  return (
+    "=== ПРИМЕРЫ УДАЧНЫХ ПОДПИСЕЙ ===\n" +
+    list +
+    "\n=== КОНЕЦ ПРИМЕРОВ ===\n\n" +
+    "Это образец МАНЕРЫ: длина, ритм, степень иронии, подача. " +
+    "НЕ копируй их и не пересказывай — напиши свежий текст в такой же " +
+    "манере, но про сегодняшний день и под характер этого чата. " +
+    "Повторение примера дословно — провал задачи.\n\n"
+  );
+}
+
+function buildPrompt(character, isWeekend, chatTitle, examples = []) {
   const dayType = isWeekend
     ? "выходной — отдых, никакой работы, можно поспать"
     : "будний рабочий день — дела, задачи, дедлайны";
@@ -140,8 +159,9 @@ function buildPrompt(character, isWeekend, chatTitle) {
         "та же степень иронии и неформальности. Если чат ироничный — " +
         "шути. Если грубоватый — не сглаживай. Если сленговый — используй сленг.\n\n" +
         "Формат:\n" +
-        "1. Начни с «Доброе утро» (можно эмодзи и своими словами: " +
-        "«Доброе утро, страдальцы» и т.п.).\n" +
+        "1. Поздоровайся своими словами. Можно «Доброе утро», можно " +
+        "иначе — лишь бы звучало живо и по-разному каждый раз. " +
+        "НЕ копируй примеры из этой инструкции дословно.\n" +
         "2. Дальше 1-2 предложения по теме дня — живых, не дежурных.\n" +
         "3. До 250 символов.\n" +
         "4. Без хэштегов, markdown и кавычек вокруг ответа.\n\n" +
@@ -155,6 +175,7 @@ function buildPrompt(character, isWeekend, chatTitle) {
         "«myself» — провал задачи.\n\n" +
         "Закончи мысль до конца: последнее предложение должно быть " +
         "завершённым, с точкой. Лучше короче, чем оборвать на полуслове.\n\n" +
+        exampleBlock(examples) +
         "Верни ТОЛЬКО текст приветствия.",
     },
     {
@@ -259,12 +280,17 @@ export function captionProblem(text) {
  * Никогда не бросает исключение — при сбое вызывающий код берёт запасную фразу.
  */
 export async function generateCaption(env, options = {}) {
-  const { character = DEFAULT_CHARACTER, isWeekend = false, chatTitle = "" } = options;
+  const {
+    character = DEFAULT_CHARACTER,
+    isWeekend = false,
+    chatTitle = "",
+    examples = [],
+  } = options;
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
   const started = Date.now();
-  const messages = buildPrompt(character, isWeekend, chatTitle);
+  const messages = buildPrompt(character, isWeekend, chatTitle, examples);
   let lastError = null;
 
   // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи

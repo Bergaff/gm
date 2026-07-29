@@ -21,6 +21,14 @@ import { localParts, parseTimeSpec } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
 import {
+  parseExamples,
+  getExamples,
+  saveExamples,
+  clearExamples,
+  pickExamples,
+  examplesText,
+} from "./examples.js";
+import {
   applyStyle,
   stylesKeyboard,
   stylesText,
@@ -76,10 +84,15 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   let captionError = null;
 
   if (settings.aiCaptions) {
+    // Примеры общие для всех чатов, берём несколько случайных.
+    // Случайных — чтобы модель не воспроизводила одни и те же.
+    const allExamples = await getExamples(env);
+
     const generated = await generateCaption(env, {
       character: settings.character || DEFAULT_CHARACTER,
       isWeekend: now.isWeekend,
       chatTitle: settings.title || "",
+      examples: pickExamples(allExamples, 4),
     });
     if (generated.ok) {
       text = generated.text;
@@ -91,7 +104,14 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     }
   }
 
-    ? `🧪 <i>Тестовая отправка</i>\n\n${text}`
+  // ВАЖНО: подпись уходит с parse_mode=HTML. Любой символ «<» из текста
+  // нейросети Telegram пытается разобрать как тег и отвечает 400
+  // «can't parse entities: Unsupported start tag». Экранируем.
+  const safeText = escapeHtml(text);
+
+  const caption = test
+    ? `🧪 <i>Тестовая отправка</i>\n\n${safeText}`
+    : safeText;
 
   const postId = newPostId();
   const folderId = parseFolderId(settings.gdriveFolder);
@@ -321,7 +341,7 @@ const KNOWN_COMMANDS = new Set([
   "/grant", "/revoke", "/access",
   "/stats", "/stats_models", "/stats_chats", "/stats_recent",
   "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv", "/usage",
-  "/change",
+  "/change", "/examples", "/examples_clear",
 ]);
 
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
@@ -499,6 +519,58 @@ export async function handleDocument(message, env, options = {}) {
     return;
   }
 
+  // Файл может быть двух видов: характер чата или общие примеры подписей.
+  // Различаем по имени файла и по тому, чего ждёт бот.
+  const pending = userId ? await getPending(chatId, userId, env) : null;
+  const wantsExamples =
+    pending?.action === "load_examples" ||
+    /пример|example|подпис/i.test(name);
+
+  if (wantsExamples) {
+    const role = await getRole(chatId, userId, env, { isChannelPost });
+    if (role !== "owner") {
+      await sendMessage(
+        chatId,
+        "⛔ Примеры общие для всех чатов — загружать может только владелец бота.",
+        env
+      );
+      return;
+    }
+
+    const parsed = parseExamples(content);
+    if (!parsed.length) {
+      await sendMessage(
+        chatId,
+        "❌ В файле не нашлось примеров.\n\n" +
+          "Нужен .txt: по одному примеру на строку либо через пустую строку. " +
+          "Строки короче 10 символов и без знаков препинания пропускаются.",
+        env
+      );
+      return;
+    }
+
+    await saveExamples(env, parsed);
+    if (userId) await clearPending(chatId, userId, env);
+
+    await sendMessage(
+      chatId,
+      [
+        `✅ Примеры загружены из <code>${escapeHtml(name)}</code>`,
+        `Распознано: <b>${parsed.length}</b>`,
+        "",
+        "<i>Первые три:</i>",
+        ...parsed.slice(0, 3).map((e) => `• ${escapeHtml(e.slice(0, 100))}`),
+        "",
+        "Примеры общие для всех чатов. В каждом чате бот пишет своё —",
+        "в этой манере, но под характер именно той беседы.",
+        "",
+        "Посмотреть: /examples · Проверить: /test",
+      ].join("\n"),
+      env
+    );
+    return;
+  }
+
   await patchSettings(
     chatId,
     { character: content.slice(0, 2000), aiCaptions: true },
@@ -573,7 +645,10 @@ export async function handleCommand(message, env, options = {}) {
     command === "/export_csv" ||
     command === "/nim_health" ||
     command === "/chats" ||
-    command === "/usage"
+    command === "/usage" ||
+    command === "/change" ||
+    command === "/examples" ||
+    command === "/examples_clear"
   ) {
     if (role !== "owner") {
       await sendMessage(chatId, "⛔ Эта команда доступна только владельцам бота.", env);
@@ -581,6 +656,18 @@ export async function handleCommand(message, env, options = {}) {
     }
     if (command === "/usage") {
       await sendMessage(chatId, await usageText(env, escapeHtml), env);
+      return;
+    }
+    if (command === "/examples") {
+      const list = await getExamples(env);
+      // Помечаем ожидание: следующий .txt уйдёт в примеры, а не в характер.
+      if (userId) await setPending(chatId, userId, "load_examples", env);
+      await sendMessage(chatId, examplesText(list, escapeHtml), env);
+      return;
+    }
+    if (command === "/examples_clear") {
+      await clearExamples(env);
+      await sendMessage(chatId, "🗑 Примеры удалены. Подписи снова пишутся без образца.", env);
       return;
     }
     if (command === "/change") {
@@ -1432,6 +1519,8 @@ function helpText(role) {
       "/nim_health",
       "/usage — остаток лимита Cloudflare",
       "/change — модели во всех чатах, смена кнопками",
+      "/examples — общие примеры подписей (.txt файлом)",
+      "/examples_clear — удалить примеры",
       "/chats",
       "/export_csv [дней]"
     );

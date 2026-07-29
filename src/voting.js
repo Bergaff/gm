@@ -11,7 +11,6 @@ import {
   deletePrompt,
   editPrompt,
   settingsTextPublic,
-  settingsTextPublic,
   changeText,
   changeKeyboard,
   changeModelsKeyboard,
