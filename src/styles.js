@@ -91,23 +91,65 @@ export function getStyle(id) {
   return STYLES[id] || STYLES[DEFAULT_STYLE];
 }
 
+// Слова, по которым видно: человек просит РИСУНОК, а не фотографию.
+const ANIME_MARKERS = [
+  "anime", "аниме", "manga", "манга", "тян", "чиби", "chibi",
+  "waifu", "вайфу", "ахегао", "сёнен", "сенен",
+];
+
+const ART_MARKERS = [
+  "painting", "картина", "маслом", "нарисован", "рисунок", "drawing",
+  "sketch", "эскиз", "иллюстрац", "illustration", "cartoon", "мультф",
+  "мультик", "комикс", "comic", "акварел", "watercolor", "граффити",
+  "graffiti", "пиксель", "pixel art",
+];
+
+// Возвращает стиль, который сам напрашивается из промпта, или null.
+export function detectStyle(prompt) {
+  const t = String(prompt || "").toLowerCase();
+  if (ANIME_MARKERS.some((m) => t.includes(m))) return "anime";
+  if (ART_MARKERS.some((m) => t.includes(m))) return "art";
+  return null;
+}
+
+/**
+ * Подбирает стиль, который не спорит с промптом.
+ *
+ * Было: промпт «аниме тян ...» + стиль «Фотореализм» давал в конце
+ * «ultra realistic, shot on Canon EOS R5» — модель получала два
+ * взаимоисключающих приказа и рисовала мыло.
+ */
+export function resolveStyle(prompt, styleId) {
+  const id = STYLES[styleId] ? styleId : DEFAULT_STYLE;
+  if (id === "none") return id;
+  // Спорят с «нарисуй» только фотографические стили.
+  if (id !== "photo" && id !== "cinematic") return id;
+  return detectStyle(prompt) || id;
+}
+
+// Склейка без двойной пунктуации: «Plant., professional» -> «Plant, professional»
+function joinPrompt(base, suffix) {
+  const clean = base.replace(/[\s.,;:]+$/, "");
+  return `${clean}, ${suffix}`;
+}
+
 /**
  * Дописывает стиль к промпту пользователя.
  * «кот на полу» + photo -> «cat on the floor, professional photography,
  *  shot on Canon EOS R5, 85mm lens, ... 8k, sharp focus»
  */
 export function applyStyle(prompt, styleId) {
-  const style = getStyle(styleId);
   const base = String(prompt || "").trim();
-
   if (!base) return base;
-  if (!style.suffix) return base;
 
   // Если пользователь уже написал развёрнутый промпт с техническими
   // деталями — не мешаем ему, стиль только помешает.
   if (looksDetailed(base)) return base;
 
-  return `${base}, ${style.suffix}`;
+  const style = getStyle(resolveStyle(base, styleId));
+  if (!style.suffix) return base;
+
+  return joinPrompt(base, style.suffix);
 }
 
 // Промпт «уже подробный», если в нём есть характерные маркеры качества
@@ -125,8 +167,22 @@ export function looksDetailed(prompt) {
   return hits >= 2 || words > 35;
 }
 
-export function negativeFor(styleId) {
-  return getStyle(styleId).negative || "";
+export function negativeFor(styleId, prompt = "") {
+  const base = String(prompt || "").trim();
+  if (base && looksDetailed(base)) return "";
+
+  const style = getStyle(base ? resolveStyle(base, styleId) : styleId);
+  const negative = style.negative || "";
+  if (!negative || !base) return negative;
+
+  // Страховка: слово из негатива не должно встречаться в самом промпте.
+  // Иначе «аниме тян» + negative «anime» гасили друг друга.
+  const text = base.toLowerCase();
+  return negative
+    .split(",")
+    .map((w) => w.trim())
+    .filter((w) => w && !text.includes(w))
+    .join(", ");
 }
 
 // Клавиатура выбора стиля

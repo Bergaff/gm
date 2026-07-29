@@ -201,14 +201,34 @@ export const CF_PROVIDERS = [
     title: "SDXL Lightning (Cloudflare, бесплатно)",
     binding: true,
     model: "@cf/bytedance/stable-diffusion-xl-lightning",
-    build: (prompt) => ({ prompt }),
+    // Lightning — дистиллированная модель: ей нужны НИЗКИЙ guidance (1-2)
+    // и мало шагов. С дефолтными guidance 7.5 / num_steps 20 она
+    // пережаривает картинку — отсюда «уровень 2022 года».
+    build: (prompt, seed, negative) => ({
+      prompt,
+      negative_prompt: negative || undefined,
+      guidance: 1.5,
+      num_steps: 8,
+      width: 1024,
+      height: 1024,
+      seed,
+    }),
   },
   {
     id: "cf-dreamshaper",
     title: "DreamShaper 8 (Cloudflare, бесплатно)",
     binding: true,
     model: "@cf/lykon/dreamshaper-8-lcm",
-    build: (prompt) => ({ prompt }),
+    // LCM-модель: рекомендованный CFG ~2, шагов 5-8.
+    build: (prompt, seed, negative) => ({
+      prompt,
+      negative_prompt: negative || undefined,
+      guidance: 2,
+      num_steps: 8,
+      width: 768,
+      height: 768,
+      seed,
+    }),
   },
 ];
 
@@ -242,9 +262,13 @@ export const GEMINI_PROVIDERS = [
     gemini: true,
     url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
     keyEnv: "GEMINI_API_KEY",
+    // ВАЖНО: у этой модели в примерах Google стоит TEXT + IMAGE.
+    // С одним лишь ["IMAGE"] она отвечает 400 «does not support the
+    // requested response modalities». Картинку берём из inlineData,
+    // текстовую часть просто игнорируем.
     build: (prompt) => ({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["IMAGE"] },
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
     }),
   },
 ];
@@ -308,7 +332,7 @@ export function base64ToBytes(base64) {
   return bytes;
 }
 
-async function callProvider(provider, prompt, env, apiKey) {
+async function callProvider(provider, prompt, env, apiKey, negative = "") {
   const seed = Math.floor(Math.random() * 2 ** 31);
   const started = Date.now();
 
@@ -359,7 +383,10 @@ async function callProvider(provider, prompt, env, apiKey) {
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
   if (provider.binding) {
     try {
-      const out = await env.AI.run(provider.model, provider.build(prompt, seed));
+      const out = await env.AI.run(
+        provider.model,
+        provider.build(prompt, seed, negative)
+      );
       const b64 = out?.image || (typeof out === "string" ? out : null);
 
       if (b64) {
@@ -474,7 +501,12 @@ function markFailed(id, env, status = 0) {
 }
 
 export async function generateImage(prompt, env, options = {}) {
-  const { preferred = "auto", chatId = null, noFallback = false } = options;
+  const {
+    preferred = "auto",
+    chatId = null,
+    noFallback = false,
+    negative = "",
+  } = options;
 
   // Пустой промпт — модели вернут мусор или ошибку. Отсекаем сразу.
   if (!String(prompt || "").trim()) {
@@ -516,7 +548,14 @@ export async function generateImage(prompt, env, options = {}) {
     // своими моделями), и только если ВСЕ они не сработали — платные NVIDIA
     // и добавленные провайдеры. Раньше очередь тасовалась целиком, и первым
     // мог оказаться NVIDIA, зря тративший кредиты.
-    const cf = getCfProviders(env);
+    // Бесплатные CF-модели идут в порядке КАЧЕСТВА, а не случайно.
+    // Раньше очередь тасовалась, и чаще всего выигрывал самый слабый
+    // SDXL-Lightning — по голосам в /models у него был рейтинг 0%.
+    const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
+    const cf = getCfProviders(env)
+      .slice()
+      .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
+
     const rest = all.filter((p) => !p.binding);
 
     const shuffle = (arr) => {
@@ -525,7 +564,7 @@ export async function generateImage(prompt, env, options = {}) {
       return [...arr.slice(off), ...arr.slice(0, off)];
     };
 
-    queue = [...shuffle(cf), ...shuffle(rest)];
+    queue = [...cf, ...shuffle(rest)];
   }
 
   const attempts = [];
@@ -542,7 +581,8 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex] || null);
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative);
+
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
       if (!provider.custom && !provider.binding && !provider.gemini && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
@@ -550,7 +590,7 @@ export async function generateImage(prompt, env, options = {}) {
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
           keyIndex = nextIndex;
-          result = await callProvider(provider, prompt, env, keys[keyIndex]);
+          result = await callProvider(provider, prompt, env, keys[keyIndex], negative);
         }
       }
     } catch (error) {

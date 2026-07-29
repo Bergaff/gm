@@ -20,7 +20,15 @@ import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
 import { localParts, parseTimeSpec } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
-import { applyStyle, stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
+import {
+  applyStyle,
+  stylesKeyboard,
+  stylesText,
+  getStyle,
+  STYLES,
+  negativeFor,
+  resolveStyle,
+} from "./styles.js";
 import {
   generateCaption,
   DEFAULT_CHARACTER,
@@ -116,7 +124,14 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   // Дописываем стиль: «кот на полу» -> «cat on the floor, professional
   // photography, 85mm lens, ...». Если промпт уже развёрнутый — не трогаем.
   let styleApplied = false;
+  let styleUsed = settings.imageStyle;
+  let negative = "";
+
   if (useNim) {
+    // resolveStyle не даст «Фотореализм» поверх промпта «аниме тян»:
+    // такой набор приказов модель отрабатывает мылом.
+    styleUsed = resolveStyle(activePrompt, settings.imageStyle);
+    negative = negativeFor(settings.imageStyle, activePrompt);
     const withStyle = applyStyle(activePrompt, settings.imageStyle);
     styleApplied = withStyle !== activePrompt;
     activePrompt = withStyle;
@@ -126,7 +141,9 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     const result = await generateImage(activePrompt, env, {
       preferred: settings.nimModel,
       chatId,
+      negative,
     });
+    
     attempts = result.attempts || [];
     if (result.ok) image = result;
     else error = "Все модели NIM недоступны";
@@ -152,6 +169,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       const result = await generateImage(activePrompt, env, {
         preferred: settings.nimModel,
         chatId,
+        negative,
       });
       attempts = attempts.concat(result.attempts || []);
       if (result.ok) image = result;
@@ -218,11 +236,37 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     captionSource,
     captionError,
     styleApplied,
-    styleId: settings.imageStyle,
+    styleId: styleUsed,
+    styleRequested: settings.imageStyle,
+    negative,
+    attempts,
     caption: text,
     assetName: image?.assetName || null,
   };
 }
+
+// Список моделей, которые отказали перед сработавшей.
+// Раньше /test молчал об этом: было видно только «Источник: cf-sdxl»,
+// а почему пропустили Gemini — приходилось гадать.
+function formatSkipped(attempts, usedProvider) {
+  if (!Array.isArray(attempts) || !attempts.length) return null;
+
+  const failed = attempts.filter((a) => a && !a.ok && a.provider !== usedProvider);
+  if (!failed.length) return null;
+
+  const lines = failed.slice(0, 6).map((a) => {
+    const why = a.status
+      ? `HTTP ${a.status}`
+      : String(a.error || "ошибка").slice(0, 60);
+    return `  • <code>${escapeHtml(String(a.provider))}</code> — ${escapeHtml(why)}`;
+  });
+
+  return "Пропущены до неё:\n" + lines.join("\n");
+}
+
+
+
+
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
   "/set_source", "/set_gdrive", "/refresh_gdrive",
@@ -953,10 +997,19 @@ export async function handleCommand(message, env, options = {}) {
         result.prompt
           ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt))}</i>`
           : null,
+        result.styleId
+          ? `Стиль: <b>${escapeHtml(STYLES[result.styleId]?.title || result.styleId)}</b>` +
+            (result.styleRequested && result.styleRequested !== result.styleId
+              ? ` <i>(вместо «${escapeHtml(STYLES[result.styleRequested]?.title || result.styleRequested)}» — промпт просит рисунок)</i>`
+              : "")
+          : null,
         `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
         result.captionError
           ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
           : null,
+        // Показываем, какие модели отказали ДО сработавшей: без этого
+        // непонятно, почему выбранная в /models модель не применилась.
+        formatSkipped(result.attempts, result.provider),
         result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
       ].filter(Boolean).join("\n");
 
