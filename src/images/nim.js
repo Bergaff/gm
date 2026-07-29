@@ -545,8 +545,13 @@ export async function generateImage(prompt, env, options = {}) {
 
   let queue;
 
+  // Модель, выбранную человеком вручную, cooldown пропускать не должен:
+  // иначе он ставит галочку на Модель 2, а картинки идут с другой.
+  let pinnedId = null;
+
   if (preferred !== "auto" && getProvider(preferred, env)) {
     const pinned = getProvider(preferred, env);
+    pinnedId = pinned.id;
     // noFallback: только запрошенная модель (нужно для /nim_health,
     // иначе перебор всех моделей упирается в лимит субреквестов).
     queue = noFallback
@@ -579,10 +584,12 @@ export async function generateImage(prompt, env, options = {}) {
   const attempts = [];
 
   for (const provider of queue) {
-    if (await isCoolingDown(provider.id, env)) {
+    // Закреплённую вручную модель пробуем всегда, даже после сбоя.
+    if (provider.id !== pinnedId && (await isCoolingDown(provider.id, env))) {
       attempts.push({
         provider: provider.id, ok: false, status: 0, latency: 0,
         error: "cooldown после недавней ошибки",
+        skipped: true,
       });
       continue;
     }

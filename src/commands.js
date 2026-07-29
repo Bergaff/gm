@@ -251,7 +251,11 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 function formatSkipped(attempts, usedProvider) {
   if (!Array.isArray(attempts) || !attempts.length) return null;
 
-  const failed = attempts.filter((a) => a && !a.ok && a.provider !== usedProvider);
+  // Пропуски по кулдауну не показываем: это внутренняя кухня бота,
+  // а не сбой. Остаются только настоящие ошибки моделей.
+  const failed = attempts.filter(
+    (a) => a && !a.ok && !a.skipped && a.provider !== usedProvider
+  );
   if (!failed.length) return null;
 
   const lines = failed.slice(0, 6).map((a) => {
