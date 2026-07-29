@@ -3,7 +3,7 @@ import {
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
 } from "./config.js";
-import { sendMessage, sendPhotoBytes, escapeHtml, tg } from "./telegram.js";
+import { sendMessage, sendPhotoBytes, escapeHtml, tg, editMessage } from "./telegram.js";
 import { getSettings, patchSettings, registerChat } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
@@ -19,6 +19,7 @@ import {
 import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
 import { localParts, parseTimeSpec } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
+import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
 import {
   generateCaption,
   DEFAULT_CHARACTER,
@@ -221,7 +222,7 @@ const KNOWN_COMMANDS = new Set([
   "/set_character", "/ai_on", "/ai_off",
   "/grant", "/revoke", "/access",
   "/stats", "/stats_models", "/stats_chats", "/stats_recent",
-  "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv",
+  "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv", "/usage",
 ]);
 
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
@@ -398,7 +399,11 @@ export async function handleDocument(message, env, options = {}) {
     return;
   }
 
-  await patchSettings(chatId, { character: content.slice(0, 2000) }, env);
+  await patchSettings(
+    chatId,
+    { character: content.slice(0, 2000), aiCaptions: true },
+    env
+  );
   if (userId) await clearPending(chatId, userId, env);
 
   await sendMessage(
@@ -409,7 +414,7 @@ export async function handleDocument(message, env, options = {}) {
       "",
       `<i>${escapeHtml(content.slice(0, 200))}${content.length > 200 ? "…" : ""}</i>`,
       "",
-      "Включить генерацию подписей: /ai_on",
+      "🤖 Генерация подписей включена автоматически. Проверить: /test",
     ].join("\n"),
     env
   );
@@ -467,10 +472,15 @@ export async function handleCommand(message, env, options = {}) {
     command.startsWith("/stats") ||
     command === "/export_csv" ||
     command === "/nim_health" ||
-    command === "/chats"
+    command === "/chats" ||
+    command === "/usage"
   ) {
     if (role !== "owner") {
       await sendMessage(chatId, "⛔ Эта команда доступна только владельцам бота.", env);
+      return;
+    }
+    if (command === "/usage") {
+      await sendMessage(chatId, await usageText(env, escapeHtml), env);
       return;
     }
     await handleStatsCommand(command, value, chatId, env);
@@ -763,12 +773,19 @@ export async function handleCommand(message, env, options = {}) {
         );
         return;
       }
-      await patchSettings(chatId, { character: value.slice(0, 2000) }, env);
+      // Раньше характер сохранялся, но подписи оставались шаблонными,
+      // пока пользователь не вспомнит про /ai_on. Включаем сразу.
+      await patchSettings(
+        chatId,
+        { character: value.slice(0, 2000), aiCaptions: true },
+        env
+      );
       await sendMessage(
         chatId,
         `✅ Характер чата сохранён (${Math.min(value.length, 2000)} симв.).` +
           (value.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
-          "\n\nВключить генерацию подписей: /ai_on",
+          "\n\n🤖 Генерация подписей <b>включена автоматически</b>.\n" +
+          "Выключить: /ai_off · Проверить: /test",
         env
       );
       return;
@@ -869,7 +886,10 @@ export async function handleCommand(message, env, options = {}) {
         s.source === "nim" || (s.source === "mixed" && true);
       const preview = pickPrompt(s, localParts(s.timezone).isWeekend);
 
-      await sendMessage(
+      // Одно служебное сообщение на весь тест: сначала «Готовлю…»,
+      // потом ЭТО ЖЕ сообщение редактируется в итоговый отчёт.
+      // Раньше слались два отдельных и засоряли чат.
+      const statusMsg = await sendMessage(
         chatId,
         [
           "⏳ Готовлю…",
@@ -880,9 +900,14 @@ export async function handleCommand(message, env, options = {}) {
               (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
             : "Картинка: случайная из Google Drive",
           `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
-        ].join("\n"),
+          !s.aiCaptions && s.character
+            ? "⚠️ <b>Характер задан, но подписи выключены!</b> Включить: /ai_on"
+            : null,
+        ].filter(Boolean).join("\n"),
         env
       );
+
+      const statusId = statusMsg?.result?.message_id || null;
 
       const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: preview });
 
@@ -904,7 +929,16 @@ export async function handleCommand(message, env, options = {}) {
         result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
       ].filter(Boolean).join("\n");
 
-      await sendMessage(chatId, (result.status === "ok" ? "✅ " : "⚠️ ") + report, env);
+      const finalText = (result.status === "ok" ? "✅ " : "⚠️ ") + report;
+
+      // Редактируем то же сообщение. Если не вышло (например, его удалили) —
+      // отправляем новое, чтобы отчёт не потерялся.
+      if (statusId) {
+        const edited = await editMessage(chatId, statusId, finalText, env);
+        if (!edited?.ok) await sendMessage(chatId, finalText, env);
+      } else {
+        await sendMessage(chatId, finalText, env);
+      }
       return;
     }
 
@@ -941,12 +975,17 @@ async function applyPendingValue(pending, text, chatId, env) {
 
 
     case "set_character": {
-      await patchSettings(chatId, { character: text.slice(0, 2000) }, env);
+      await patchSettings(
+        chatId,
+        { character: text.slice(0, 2000), aiCaptions: true },
+        env
+      );
       await sendMessage(
         chatId,
         `✅ Характер чата сохранён (${Math.min(text.length, 2000)} симв.).` +
           (text.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
-          "\n\nВключить генерацию подписей нейросетью: /ai_on",
+          "\n\n🤖 Генерация подписей <b>включена автоматически</b>.\n" +
+          "Выключить: /ai_off · Проверить: /test",
         env
       );
       return;
@@ -989,6 +1028,12 @@ async function runDiagnostics(chatId, env) {
     lines.push("❌ NVIDIA текст: ключа нет (NVIDIA_TEXT_API_KEY)");
   }
   lines.push(`Модель текста: <code>${escapeHtml(getTextModel(env))}</code>`);
+
+  if (env.AI) {
+    const u = await getUsage(env);
+    const pct = ((u.total / FREE_NEURONS_PER_DAY) * 100).toFixed(0);
+    lines.push(`⚡ Workers AI сегодня: ${Math.round(u.total)}/${FREE_NEURONS_PER_DAY} нейронов (${pct}%) — /usage`);
+  }
 
   const custom = getCustomProviders(env);
   if (custom.length) {
@@ -1251,6 +1296,7 @@ function helpText(role) {
       "/stats_post &lt;id&gt;",
       "/stats_errors [N]",
       "/nim_health",
+      "/usage — остаток лимита Cloudflare",
       "/chats",
       "/export_csv [дней]"
     );

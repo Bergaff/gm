@@ -1,3 +1,5 @@
+import { addUsage, estimateImageNeurons } from "../usage.js";
+
 const BASE = "https://ai.api.nvidia.com/v1/genai";
 // ВАЖНО: waitUntil() в Cloudflare даёт всего 30 секунд после ответа на webhook.
 // Таймаут 55 сек означал, что воркер убивали РАНЬШЕ, чем срабатывал таймаут —
@@ -170,8 +172,14 @@ function fillTemplate(node, prompt, seed) {
 
 // Встроенные NVIDIA + добавленные пользователем
 export function getAllProviders(env) {
-  // Cloudflare идёт первым: бесплатный и не тратит кредиты NVIDIA.
-  return [...getCfProviders(env), ...NIM_PROVIDERS, ...getCustomProviders(env)];
+  // Порядок = приоритет: Gemini (лучшее качество, свой бесплатный лимит),
+  // затем Cloudflare (бесплатно), затем NVIDIA и свои провайдеры.
+  return [
+    ...getGeminiProviders(env),
+    ...getCfProviders(env),
+    ...NIM_PROVIDERS,
+    ...getCustomProviders(env),
+  ];
 }
 
 /**
@@ -203,6 +211,34 @@ export const CF_PROVIDERS = [
     build: (prompt) => ({ prompt }),
   },
 ];
+
+
+/**
+ * Google Gemini («Nano Banana») — качество на уровне современных ИИ.
+ * Бесплатный тариф в AI Studio, карта не нужна: aistudio.google.com/apikey
+ * Ключ кладётся в секрет GEMINI_API_KEY.
+ *
+ * Формат ответа отличается от остальных: картинка лежит в
+ * candidates[0].content.parts[].inlineData.data (base64).
+ */
+export const GEMINI_PROVIDERS = [
+  {
+    id: "gemini-image",
+    title: "Gemini 2.5 Flash Image (Google)",
+    gemini: true,
+    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+    keyEnv: "GEMINI_API_KEY",
+    build: (prompt) => ({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ["IMAGE"] },
+    }),
+  },
+];
+
+function getGeminiProviders(env) {
+  return env && env.GEMINI_API_KEY ? GEMINI_PROVIDERS : [];
+}
+
 
 // Доступны, только если в wrangler.toml подключён binding [ai]
 function getCfProviders(env) {
@@ -262,6 +298,49 @@ async function callProvider(provider, prompt, env, apiKey) {
   const seed = Math.floor(Math.random() * 2 ** 31);
   const started = Date.now();
 
+  // Google Gemini — заголовок x-goog-api-key и особый формат ответа.
+  if (provider.gemini) {
+    const key = env[provider.keyEnv];
+    if (!key) {
+      return { ok: false, status: 0, latency: 0,
+               error: `Не задан секрет ${provider.keyEnv}` };
+    }
+
+    const response = await fetch(provider.url, {
+      method: "POST",
+      headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify(provider.build(prompt, seed)),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+
+    const latency = Date.now() - started;
+
+    if (!response.ok) {
+      const body = await response.text();
+      return { ok: false, status: response.status, latency, error: body.slice(0, 300) };
+    }
+
+    const data = await response.json();
+    // Картинка лежит в parts[].inlineData.data
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const inline = parts.find((p) => p?.inlineData?.data)?.inlineData?.data;
+
+    if (inline) {
+      await addUsage(env, 0, "image"); // у Gemini свой лимит, нейроны не тратятся
+      return { ok: true, status: 200, latency, bytes: base64ToBytes(inline), seed };
+    }
+
+    // Модель могла ответить текстом вместо картинки (например, отказ)
+    const textPart = parts.find((p) => p?.text)?.text;
+    return {
+      ok: false, status: response.status, latency,
+      error: textPart
+        ? "Gemini вернул текст вместо картинки: " + String(textPart).slice(0, 200)
+        : "Gemini: нет изображения в ответе",
+    };
+  }
+
+
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
   if (provider.binding) {
     try {
@@ -269,12 +348,15 @@ async function callProvider(provider, prompt, env, apiKey) {
       const b64 = out?.image || (typeof out === "string" ? out : null);
 
       if (b64) {
+        // Считаем расход нейронов для /usage
+        await addUsage(env, estimateImageNeurons(provider.model), "image");
         return { ok: true, status: 200, latency: Date.now() - started,
                  bytes: base64ToBytes(b64), seed };
       }
       // некоторые модели отдают поток байтов
       if (out instanceof ReadableStream) {
         const buf = await new Response(out).arrayBuffer();
+        await addUsage(env, estimateImageNeurons(provider.model), "image");
         return { ok: true, status: 200, latency: Date.now() - started,
                  bytes: new Uint8Array(buf), seed };
       }
@@ -387,14 +469,15 @@ export async function generateImage(prompt, env, options = {}) {
   }
 
   const keys = getApiKeys(env);
-  const hasCustom = getCustomProviders(env).length > 0 || getCfProviders(env).length > 0;
+  const hasCustom = getCustomProviders(env).length > 0 ||
+    getCfProviders(env).length > 0 || getGeminiProviders(env).length > 0;
 
   // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
   if (!keys.length && !hasCustom) {
     return {
       ok: false,
       attempts: [{ provider: "-", ok: false, status: 0, latency: 0,
-                   error: "Нет доступных провайдеров. Включите Workers AI (binding [ai] в wrangler.toml) или задайте NVIDIA_API_KEY" }]
+                   error: "Нет доступных провайдеров. Задайте GEMINI_API_KEY, включите Workers AI ([ai] в wrangler.toml) или задайте NVIDIA_API_KEY" }]
     };
   }
   let keyIndex = keys.length ? await pickKeyIndex(keys, env) : 0;
@@ -445,7 +528,7 @@ export async function generateImage(prompt, env, options = {}) {
       result = await callProvider(provider, prompt, env, keys[keyIndex] || null);
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
-      if (!provider.custom && !provider.binding && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
+      if (!provider.custom && !provider.binding && !provider.gemini && !result.ok && [401, 403, 429].includes(result.status) && keys.length > 1) {
         await markKeyFailed(keyIndex, env, result.status);
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {

@@ -3,6 +3,7 @@
 // и нейросеть пишет текст под него — свой для будней и выходных.
 
 import { getApiKeys } from "./images/nim.js";
+import { addUsage, estimateTextNeurons } from "./usage.js";
 
 const TIMEOUT_MS = 12000; // укладываемся в лимит waitUntil (30 сек на всё)
 
@@ -30,7 +31,13 @@ async function generateViaCfBinding(env, messages) {
     temperature: 1.0,
     max_tokens: 250,
   });
-  return String(out?.response || out?.result?.response || "").trim();
+  const text = String(out?.response || out?.result?.response || "").trim();
+
+  // Учёт расхода нейронов для /usage
+  const inChars = messages.reduce((n, m) => n + String(m.content || "").length, 0);
+  await addUsage(env, estimateTextNeurons(inChars, text.length), "text");
+
+  return text;
 }
 
 
@@ -352,6 +359,7 @@ export async function translatePrompt(prompt, env) {
         max_tokens: 400,
       });
       let t = String(out?.response || "").trim().replace(/^["«„']+|["»“']+$/g, "");
+      await addUsage(env, estimateTextNeurons(original.length + 120, t.length), "text");
       if (t && !needsTranslation(t)) {
         try { await env.BOT_KV.put(key, t, { expirationTtl: 90 * 24 * 60 * 60 }); } catch {}
         return { text: t, translated: true, cached: false };
