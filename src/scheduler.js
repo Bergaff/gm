@@ -18,12 +18,37 @@ export function localParts(timeZone) {
     if (part.type !== "literal") map[part.type] = part.value;
   }
 
+  const weekday = map.weekday; // Mon, Tue, ... Sun
+
   return {
     date: `${map.year}-${map.month}-${map.day}`,
     hour: Number(map.hour) % 24,
     minute: Number(map.minute),
-    isWeekend: ["Sat", "Sun"].includes(map.weekday),
+    isWeekend: ["Sat", "Sun"].includes(weekday),
+
+    // День недели нужен подписям: раньше их знание ограничивалось
+    // «будни/выходные», и во вторник модель писала про понедельник.
+    weekday,
+    isMonday: weekday === "Mon",
+    isFriday: weekday === "Fri",
+    isSaturday: weekday === "Sat",
+    isSunday: weekday === "Sun",
   };
+}
+
+// Название дня по-русски — для промпта подписи
+const RU_WEEKDAY = {
+  Mon: "понедельник",
+  Tue: "вторник",
+  Wed: "среда",
+  Thu: "четверг",
+  Fri: "пятница",
+  Sat: "суббота",
+  Sun: "воскресенье",
+};
+
+export function weekdayRu(weekday) {
+  return RU_WEEKDAY[weekday] || "";
 }
 
 export function parseTimeSpec(spec) {

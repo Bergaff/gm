@@ -11,7 +11,16 @@ function freshDefaults() {
 }
 
 export async function getSettings(chatId, env) {
-  const saved = await env.BOT_KV.get(KEY(chatId), "json");
+  // ВАЖНО: KV.get(..., "json") бросает исключение на битой записи.
+  // Раньше один повреждённый чат ронял ЛЮБУЮ команду, которая
+  // перебирает все чаты (/chats, /change) — бот просто молчал.
+  let saved = null;
+  try {
+    saved = await env.BOT_KV.get(KEY(chatId), "json");
+  } catch {
+    // запись повреждена — работаем на настройках по умолчанию
+    saved = null;
+  }
   return { ...freshDefaults(), ...(saved || {}) };
 }
 

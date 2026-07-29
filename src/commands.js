@@ -2,6 +2,7 @@ import {
   DEFAULT_SETTINGS,
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
+  DAY_MESSAGES,
 } from "./config.js";
 import { sendMessage, sendPhotoBytes, escapeHtml, tg, editMessage } from "./telegram.js";
 import { getSettings, patchSettings, registerChat, listChats } from "./storage.js";
@@ -70,6 +71,20 @@ export function voteKeyboard(postId, likes = 0, dislikes = 0) {
   };
 }
 
+// Шаблонная фраза с учётом дня недели.
+// У понедельника, пятницы и воскресенья своё настроение — раньше
+// в любой день шла одна и та же обезличенная фраза.
+function pickTemplate(now) {
+  const special = DAY_MESSAGES[now.weekday];
+
+  // В «особые» дни половину раз берём тематическую фразу
+  if (special && special.length && Math.random() < 0.5) {
+    return pick(special);
+  }
+
+  return pick(now.isWeekend ? WEEKEND_MESSAGES : WEEKDAY_MESSAGES);
+}
+
 export async function sendMorning(chatId, settings, env, options = {}) {
   // forcePrompt: /test заранее показывает промпт пользователю и передаёт
   // его сюда. Без этого pickPrompt вызывался дважды и случайно выбирал
@@ -79,7 +94,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   const now = localParts(settings.timezone);
 
   // Подпись: либо генерирует нейросеть под характер чата, либо готовая фраза.
-  let text = pick(now.isWeekend ? WEEKEND_MESSAGES : WEEKDAY_MESSAGES);
+  let text = pickTemplate(now);
   let captionSource = "template";
   let captionError = null;
 
@@ -93,6 +108,9 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       isWeekend: now.isWeekend,
       chatTitle: settings.title || "",
       examples: pickExamples(allExamples, 4),
+      // Точный день недели: без него модель писала «опять понедельник»
+      // во вторник и про конец недели в среду.
+      weekday: now.weekday,
     });
     if (generated.ok) {
       text = generated.text;
@@ -268,10 +286,24 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 // ── /change — владелец видит модели во ВСЕХ чатах и меняет их ─────────
 // Обычные команды правят только тот чат, где отправлены. Здесь владелец
 // работает с любым чатом, не заходя в него.
-export async function changeText(env, listChats, getSettings) {
-  const ids = await listChats(env);
+// Telegram режет сообщение на 4096 символах и кнопки на ~100 штуках.
+// При большом числе чатов ответ не влезал, приходил HTTP 400,
+// и бот молчал. Показываем страницами.
+const CHATS_PER_PAGE = 20;
+
+export async function changeText(env, listChats, getSettings, page = 0) {
+  const all = await listChats(env);
+  const pages = Math.max(1, Math.ceil(all.length / CHATS_PER_PAGE));
+  const cur = Math.min(Math.max(0, page), pages - 1);
+  const ids = all.slice(cur * CHATS_PER_PAGE, (cur + 1) * CHATS_PER_PAGE);
+
   const providers = getAllProviders(env);
   const lines = ["🔧 <b>Модели по чатам</b>", ""];
+
+  if (pages > 1) {
+    lines.push(`Страница <b>${cur + 1}</b> из <b>${pages}</b> · всего чатов: ${all.length}`);
+    lines.push("");
+  }
 
   for (const id of ids) {
     const s = await getSettings(id, env);
@@ -287,17 +319,22 @@ export async function changeText(env, listChats, getSettings) {
     lines.push(`   стиль: ${getStyle(s.imageStyle).title} · ${s.source}`);
   }
 
-  if (!ids.length) lines.push("<i>Бот пока никуда не добавлен.</i>");
+  if (!all.length) lines.push("<i>Бот пока никуда не добавлен.</i>");
   else {
     lines.push("");
     lines.push("<i>Нажмите чат, чтобы сменить в нём модель.</i>");
+    lines.push("<i>Участники чата этого не увидят.</i>");
   }
 
   return lines.join("\n");
 }
 
-export async function changeKeyboard(env, listChats, getSettings) {
-  const ids = await listChats(env);
+export async function changeKeyboard(env, listChats, getSettings, page = 0) {
+  const all = await listChats(env);
+  const pages = Math.max(1, Math.ceil(all.length / CHATS_PER_PAGE));
+  const cur = Math.min(Math.max(0, page), pages - 1);
+  const ids = all.slice(cur * CHATS_PER_PAGE, (cur + 1) * CHATS_PER_PAGE);
+
   const rows = [];
 
   for (const id of ids) {
@@ -306,6 +343,14 @@ export async function changeKeyboard(env, listChats, getSettings) {
       text: `${s.enabled ? "🟢" : "🔴"} ${String(s.title || id).slice(0, 30)}`,
       callback_data: `c|pick|${id}`,
     }]);
+  }
+
+  if (pages > 1) {
+    const nav = [];
+    if (cur > 0) nav.push({ text: "◀️", callback_data: `c|page|${cur - 1}` });
+    nav.push({ text: `${cur + 1}/${pages}`, callback_data: "c|noop|-" });
+    if (cur < pages - 1) nav.push({ text: "▶️", callback_data: `c|page|${cur + 1}` });
+    rows.push(nav);
   }
 
   return { inline_keyboard: rows };
@@ -671,12 +716,22 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
     if (command === "/change") {
-      await sendMessage(
-        chatId,
-        await changeText(env, listChats, getSettings),
-        env,
-        { reply_markup: await changeKeyboard(env, listChats, getSettings) }
-      );
+      // Раньше исключение улетало в route() и бот молча ничего не слал.
+      // Теперь причина видна прямо в чате.
+      try {
+        await sendMessage(
+          chatId,
+          await changeText(env, listChats, getSettings, 0),
+          env,
+          { reply_markup: await changeKeyboard(env, listChats, getSettings, 0) }
+        );
+      } catch (e) {
+        await sendMessage(
+          chatId,
+          `❌ /change упал: <code>${escapeHtml(String(e.message || e).slice(0, 300))}</code>`,
+          env
+        );
+      }
       return;
     }
     await handleStatsCommand(command, value, chatId, env);

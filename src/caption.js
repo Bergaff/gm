@@ -138,10 +138,56 @@ function exampleBlock(examples) {
   );
 }
 
-function buildPrompt(character, isWeekend, chatTitle, examples = []) {
-  const dayType = isWeekend
+// Правило про день недели для промпта.
+// Главное — запретить упоминать ЧУЖОЙ день: это была самая заметная
+// ошибка, когда во вторник приходило «снова понедельник».
+function dayRule(weekday, mention) {
+  const ru = {
+    Mon: "понедельник", Tue: "вторник", Wed: "среда", Thu: "четверг",
+    Fri: "пятница", Sat: "суббота", Sun: "воскресенье",
+  }[weekday];
+
+  if (!ru) return "";
+
+  const base =
+    `ДЕНЬ НЕДЕЛИ: сегодня ${ru.toUpperCase()}. ` +
+    "Категорически запрещено называть другой день или писать про " +
+    "начало недели во вторник, про конец недели в среду и подобное. " +
+    "Если сомневаешься — вообще не упоминай день.\n";
+
+  return mention
+    ? base +
+      `В этой подписи ОБЫГРАЙ то, что сегодня ${ru}: настроение дня, ` +
+      "его место в неделе. Не в лоб «сегодня " + ru + "», а живо.\n\n"
+    : base + "В этой подписи день недели упоминать НЕ надо.\n\n";
+}
+
+// Что можно упомянуть в конкретный день недели.
+const DAY_HINTS = {
+  Mon: "понедельник, начало рабочей недели — тяжёлый подъём, впереди вся неделя",
+  Tue: "вторник, неделя только раскачивается — до выходных далеко",
+  Wed: "среда, середина недели — экватор, половина позади",
+  Thu: "четверг, до конца недели один день — уже видно финиш",
+  Fri: "пятница, последний рабочий день — вечером свобода",
+  Sat: "суббота, первый выходной — можно отсыпаться и ничего не делать",
+  Sun: "воскресенье, последний выходной — завтра снова на работу",
+};
+
+// Насколько часто подпись привязывается к конкретному дню.
+// Не всегда: иначе каждый понедельник будет об одном и том же.
+const DAY_MENTION_CHANCE = 0.5;
+
+function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "") {
+  const base = isWeekend
     ? "выходной — отдых, никакой работы, можно поспать"
     : "будний рабочий день — дела, задачи, дедлайны";
+
+  const hint = DAY_HINTS[weekday];
+  const mentionDay = hint && Math.random() < DAY_MENTION_CHANCE;
+
+  // Точный день сообщаем ВСЕГДА — чтобы модель не выдумала чужой.
+  // А вот обыгрывать его просим только иногда.
+  const dayType = hint ? `${hint}. По типу это ${base}` : base;
 
   // ВАЖНО: характер чата идёт в system-сообщение и стоит ПЕРВЫМ.
   // Раньше он был в user, а system диктовал нейтральный тон — модель
@@ -175,6 +221,7 @@ function buildPrompt(character, isWeekend, chatTitle, examples = []) {
         "«myself» — провал задачи.\n\n" +
         "Закончи мысль до конца: последнее предложение должно быть " +
         "завершённым, с точкой. Лучше короче, чем оборвать на полуслове.\n\n" +
+        dayRule(weekday, mentionDay) +
         exampleBlock(examples) +
         "Верни ТОЛЬКО текст приветствия.",
     },
@@ -285,12 +332,13 @@ export async function generateCaption(env, options = {}) {
     isWeekend = false,
     chatTitle = "",
     examples = [],
+    weekday = "",
   } = options;
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
   const started = Date.now();
-  const messages = buildPrompt(character, isWeekend, chatTitle, examples);
+  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday);
   let lastError = null;
 
   // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи

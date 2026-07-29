@@ -271,11 +271,18 @@ async function chatsList(chatId, env) {
   const chats = await listChats(env);
   const lines = [];
 
-  for (const id of chats) {
+  // Не больше 25 за раз: при большем числе сообщение упиралось
+  // в лимит Telegram 4096 символов и не отправлялось вообще.
+  for (const id of chats.slice(0, 25)) {
     const s = await getSettings(id, env);
     lines.push(
       `• ${escapeHtml(s.title || id)} <code>${id}</code>\n  ${s.enabled ? "🟢" : "🔴"} ${s.source} · ${s.weekdayTime}/${s.weekendTime} · ${s.timezone}`
     );
+  }
+
+  if (chats.length > 25) {
+    lines.push("");
+    lines.push(`<i>…и ещё ${chats.length - 25}. Полный список: /change</i>`);
   }
 
   return sendMessage(chatId, `📋 <b>Чаты (${chats.length})</b>\n\n${lines.join("\n") || "пусто"}`, env);

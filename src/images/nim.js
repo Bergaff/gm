@@ -1,4 +1,5 @@
 import { addUsage, estimateImageNeurons } from "../usage.js";
+import { imageProblem } from "./quality.js";
 
 const BASE = "https://ai.api.nvidia.com/v1/genai";
 // ВАЖНО: waitUntil() в Cloudflare даёт всего 30 секунд после ответа на webhook.
@@ -85,6 +86,8 @@ export const NIM_PROVIDERS = [
     }),
   },
   {
+    // Отключена: качество ниже остальных в пуле.
+    disabled: true,
     id: "sdxl",
     title: "Stable Diffusion XL",
     url: `${BASE}/stabilityai/stable-diffusion-xl`,
@@ -94,6 +97,8 @@ export const NIM_PROVIDERS = [
     }),
   },
   {
+    // Отключена: качество ниже остальных в пуле.
+    disabled: true,
     id: "bria-23",
     title: "BRIA 2.3",
     url: `${BASE}/briaai/bria-2.3`,
@@ -174,12 +179,16 @@ function fillTemplate(node, prompt, seed) {
 export function getAllProviders(env) {
   // Порядок = приоритет: Gemini (лучшее качество, свой бесплатный лимит),
   // затем Cloudflare (бесплатно), затем NVIDIA и свои провайдеры.
+  // disabled — модели, отключённые по качеству. Секрет SHOW_ALL_MODELS=1
+  // возвращает их обратно, если понадобится сравнить.
+  const showAll = env && String(env.SHOW_ALL_MODELS || "") === "1";
+
   return [
     ...getGeminiProviders(env),
     ...getCfProviders(env),
     ...NIM_PROVIDERS,
     ...getCustomProviders(env),
-  ];
+  ].filter((p) => showAll || !p.disabled);
 }
 
 /**
@@ -197,6 +206,9 @@ export const CF_PROVIDERS = [
     build: (prompt, seed) => ({ prompt, seed, steps: 4 }),
   },
   {
+    // Отключена: по голосам в /models рейтинг 0% (0 лайков на 15 постов).
+    // Остаётся в файле, чтобы можно было вернуть, но в пул не попадает.
+    disabled: true,
     id: "cf-sdxl",
     title: "SDXL Lightning (Cloudflare, бесплатно)",
     binding: true,
@@ -500,7 +512,11 @@ async function isCoolingDown(id, env) {
   return Boolean(await env.BOT_KV.get(`nimfail:${id}`));
 }
 
-function markFailed(id, env, status = 0) {
+function markFailed(id, env, status = 0, error = "") {
+  // Брак генерации (чёрный кадр) — разовый сбой, а не поломка модели.
+  // Гасить её на 30 минут незачем: следующий запрос обычно нормальный.
+  if (String(error).startsWith("брак генерации")) return;
+
   // 400/422 — это плохой запрос (например, промпт), повтор через 30 минут
   // ничего не изменит и зря выключает рабочую модель. 401/403/429 и 5xx —
   // временные/квотные, их гасим на полный срок.
@@ -613,6 +629,21 @@ export async function generateImage(prompt, env, options = {}) {
       result = { ok: false, status: 0, latency: 0, error: String(error).slice(0, 300) };
     }
 
+    // Модель могла вернуть «успех» с чёрным или однотонным кадром:
+    // сработал safety-фильтр либо свалился декодер. Байты есть,
+    // статус 200 — а в чат уходил пустой прямоугольник.
+    if (result.ok && result.bytes) {
+      const badImage = imageProblem(result.bytes);
+      if (badImage) {
+        result = {
+          ok: false,
+          status: result.status,
+          latency: result.latency,
+          error: "брак генерации: " + badImage,
+        };
+      }
+    }
+
     attempts.push({
       provider: provider.id,
       ok: result.ok,
@@ -635,7 +666,7 @@ export async function generateImage(prompt, env, options = {}) {
       };
     }
 
-    await markFailed(provider.id, env, result.status);
+    await markFailed(provider.id, env, result.status, result.error);
   }
 
   return { ok: false, attempts };

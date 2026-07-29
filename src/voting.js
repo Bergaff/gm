@@ -70,12 +70,19 @@ export async function handleCallback(query, env) {
     const [, action, targetId, value] = data.split("|");
     const mid = query.message.message_id;
 
-    if (action === "list") {
+    // c|noop| — кнопка-счётчик «2/5», ничего не делает
+    if (action === "noop") {
+      await answerCallback(query.id, "", env);
+      return;
+    }
+
+    if (action === "list" || action === "page") {
+      const page = action === "page" ? Number(targetId) || 0 : 0;
       await editMessage(
         chatId, mid,
-        await changeText(env, listChats, getSettings),
+        await changeText(env, listChats, getSettings, page),
         env,
-        await changeKeyboard(env, listChats, getSettings)
+        await changeKeyboard(env, listChats, getSettings, page)
       );
       await answerCallback(query.id, "", env);
       return;
