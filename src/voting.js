@@ -1,4 +1,4 @@
-import { answerCallback, editMarkup, editMessage, sendMessage } from "./telegram.js";
+import { answerCallback, editMarkup, editMessage, sendMessage, escapeHtml } from "./telegram.js";
 import { getVote, setVote, countVotes, votesByProvider } from "./db.js";
 import {
   voteKeyboard,
@@ -11,9 +11,14 @@ import {
   deletePrompt,
   editPrompt,
   settingsTextPublic,
+  settingsTextPublic,
+  changeText,
+  changeKeyboard,
+  changeModelsKeyboard,
 } from "./commands.js";
-import { getSettings, patchSettings } from "./storage.js";
+import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
+import { isAdmin } from "./config.js";
 import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
@@ -53,6 +58,62 @@ export async function handleCallback(query, env) {
     return;
   }
 
+
+  // ── /change: владелец меняет модель в ЛЮБОМ чате ────────────────────
+  // Права строже обычных: не админ чата, а владелец бота,
+  // потому что действие затрагивает чужие чаты.
+  if (data.startsWith("c|")) {
+    if (!isAdmin(userId)) {
+      await answerCallback(query.id, "⛔ Только владелец бота", env, true);
+      return;
+    }
+
+    const [, action, targetId, value] = data.split("|");
+    const mid = query.message.message_id;
+
+    if (action === "list") {
+      await editMessage(
+        chatId, mid,
+        await changeText(env, listChats, getSettings),
+        env,
+        await changeKeyboard(env, listChats, getSettings)
+      );
+      await answerCallback(query.id, "", env);
+      return;
+    }
+
+    if (action === "pick") {
+      const st = await getSettings(targetId, env);
+      await editMessage(
+        chatId, mid,
+        `🔧 <b>${escapeHtml(st.title || targetId)}</b>\n\nВыберите модель:`,
+        env,
+        changeModelsKeyboard(env, targetId, st.nimModel)
+      );
+      await answerCallback(query.id, "", env);
+      return;
+    }
+
+    if (action === "set") {
+      await patchSettings(targetId, { nimModel: value }, env);
+      const st = await getSettings(targetId, env);
+
+      await editMessage(
+        chatId, mid,
+        `🔧 <b>${escapeHtml(st.title || targetId)}</b>\n\nВыберите модель:`,
+        env,
+        changeModelsKeyboard(env, targetId, value)
+      );
+
+      const idx = getAllProviders(env).findIndex((p) => p.id === value);
+      await answerCallback(
+        query.id,
+        value === "auto" ? "Авто" : idx >= 0 ? `Модель ${idx + 1}` : value,
+        env
+      );
+      return;
+    }
+  }
 
   // ── Навигация: кнопки «Назад» и переходы между разделами ────────────
   if (data.startsWith("nav|")) {

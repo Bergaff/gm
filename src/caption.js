@@ -28,7 +28,9 @@ const CF_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 async function generateViaCfBinding(env, messages) {
   const out = await env.AI.run(String(env.TEXT_API_MODEL || CF_TEXT_MODEL), {
     messages,
-    temperature: 1.0,
+    // temperature 1.0 заставляла llama срываться на английский
+    // и китайский посреди русской фразы. 0.7 сохраняет живость.
+    temperature: 0.7,
     // Кириллица у llama «дорогая»: ~1 токен на 1.2 символа. При 250 токенах
     // текст обрывался ровно на границе, на полуслове. Даём запас.
     max_tokens: 500,
@@ -225,9 +227,29 @@ export function captionProblem(text) {
   const letters = out.match(/\p{L}/gu) || [];
   if (!letters.length) return "нет букв";
 
-  const cyrillic = out.match(/[\u0400-\u04FF]/g) || [];
-  // Подпись должна быть русской: кириллицы минимум 80% букв
-  if (cyrillic.length / letters.length < 0.8) return "текст не на русском";
+  // Сначала латинские СЛОВА: доли процентов мало — «обещаю myself» это
+  // 95% кириллицы, но читается как брак.
+  const allowed = new Set([
+    "telegram", "python", "javascript", "js", "html", "css", "sql",
+    "github", "google", "cloudflare", "openai", "chatgpt", "ai",
+    "windows", "linux", "macos", "android", "ios", "wifi", "usb",
+    "pdf", "excel", "word", "zoom", "email", "ok", "it", "hr", "pr",
+  ]);
+
+  const latinWords = out.match(/[A-Za-z][A-Za-z'-]{1,}/g) || [];
+  const bad = latinWords.filter((w) => !allowed.has(w.toLowerCase()));
+  if (bad.length) return "иностранные слова: " + bad.slice(0, 3).join(", ");
+
+  // Долю кириллицы считаем БЕЗ разрешённых названий: короткая фраза
+  // «Деплоим в Telegram и отдыхаем» иначе не проходила порог.
+  const stripped = out.replace(/[A-Za-z][A-Za-z'-]{1,}/g, "");
+  const strippedLetters = stripped.match(/\p{L}/gu) || [];
+  const cyrillic = stripped.match(/[\u0400-\u04FF]/g) || [];
+
+  if (!cyrillic.length) return "текст не на русском";
+  if (cyrillic.length / strippedLetters.length < 0.8) {
+    return "текст не на русском";
+  }
 
   return null;
 }
@@ -295,8 +317,8 @@ export async function generateCaption(env, options = {}) {
         body: JSON.stringify({
           model,
           messages,
-          temperature: 1.0,
-          top_p: 0.95,
+          temperature: 0.7,
+          top_p: 0.9,
           // presence_penalty гонит модель от заезженных формулировок
           presence_penalty: 0.6,
           frequency_penalty: 0.3,

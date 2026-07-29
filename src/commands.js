@@ -4,7 +4,7 @@ import {
   WEEKEND_MESSAGES,
 } from "./config.js";
 import { sendMessage, sendPhotoBytes, escapeHtml, tg, editMessage } from "./telegram.js";
-import { getSettings, patchSettings, registerChat } from "./storage.js";
+import { getSettings, patchSettings, registerChat, listChats } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
 import { parseFolderId, getGdriveImage, listImages } from "./images/gdrive.js";
@@ -91,9 +91,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     }
   }
 
-  const caption = test
     ? `🧪 <i>Тестовая отправка</i>\n\n${text}`
-    : text;
 
   const postId = newPostId();
   const folderId = parseFolderId(settings.gdriveFolder);
@@ -143,7 +141,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       chatId,
       negative,
     });
-    
+
     attempts = result.attempts || [];
     if (result.ok) image = result;
     else error = "Все модели NIM недоступны";
@@ -247,6 +245,69 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 
 
 
+// ── /change — владелец видит модели во ВСЕХ чатах и меняет их ─────────
+// Обычные команды правят только тот чат, где отправлены. Здесь владелец
+// работает с любым чатом, не заходя в него.
+export async function changeText(env, listChats, getSettings) {
+  const ids = await listChats(env);
+  const providers = getAllProviders(env);
+  const lines = ["🔧 <b>Модели по чатам</b>", ""];
+
+  for (const id of ids) {
+    const s = await getSettings(id, env);
+    const idx = providers.findIndex((p) => p.id === s.nimModel);
+    const model = s.nimModel === "auto"
+      ? "🎲 Авто"
+      : idx >= 0
+        ? `Модель ${idx + 1} — ${providers[idx].title}`
+        : s.nimModel;
+
+    lines.push(`• <b>${escapeHtml(s.title || id)}</b>`);
+    lines.push(`   ${s.enabled ? "🟢" : "🔴"} ${escapeHtml(model)}`);
+    lines.push(`   стиль: ${getStyle(s.imageStyle).title} · ${s.source}`);
+  }
+
+  if (!ids.length) lines.push("<i>Бот пока никуда не добавлен.</i>");
+  else {
+    lines.push("");
+    lines.push("<i>Нажмите чат, чтобы сменить в нём модель.</i>");
+  }
+
+  return lines.join("\n");
+}
+
+export async function changeKeyboard(env, listChats, getSettings) {
+  const ids = await listChats(env);
+  const rows = [];
+
+  for (const id of ids) {
+    const s = await getSettings(id, env);
+    rows.push([{
+      text: `${s.enabled ? "🟢" : "🔴"} ${String(s.title || id).slice(0, 30)}`,
+      callback_data: `c|pick|${id}`,
+    }]);
+  }
+
+  return { inline_keyboard: rows };
+}
+
+// Экран выбора модели для КОНКРЕТНОГО чата (по его id)
+export function changeModelsKeyboard(env, targetId, current) {
+  const providers = getAllProviders(env);
+  const rows = providers.map((p, i) => [{
+    text: `${p.id === current ? "✅ " : ""}Модель ${i + 1} — ${p.title.slice(0, 28)}`,
+    callback_data: `c|set|${targetId}|${p.id}`,
+  }]);
+
+  rows.unshift([{
+    text: `${current === "auto" ? "✅ " : ""}🎲 Авто (перебор всех)`,
+    callback_data: `c|set|${targetId}|auto`,
+  }]);
+
+  rows.push([{ text: "◀️ К списку чатов", callback_data: "c|list|-" }]);
+  return { inline_keyboard: rows };
+}
+
 
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
@@ -260,6 +321,7 @@ const KNOWN_COMMANDS = new Set([
   "/grant", "/revoke", "/access",
   "/stats", "/stats_models", "/stats_chats", "/stats_recent",
   "/stats_post", "/stats_errors", "/nim_health", "/chats", "/export_csv", "/usage",
+  "/change",
 ]);
 
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
@@ -519,6 +581,15 @@ export async function handleCommand(message, env, options = {}) {
     }
     if (command === "/usage") {
       await sendMessage(chatId, await usageText(env, escapeHtml), env);
+      return;
+    }
+    if (command === "/change") {
+      await sendMessage(
+        chatId,
+        await changeText(env, listChats, getSettings),
+        env,
+        { reply_markup: await changeKeyboard(env, listChats, getSettings) }
+      );
       return;
     }
     await handleStatsCommand(command, value, chatId, env);
@@ -1360,6 +1431,7 @@ function helpText(role) {
       "/stats_errors [N]",
       "/nim_health",
       "/usage — остаток лимита Cloudflare",
+      "/change — модели во всех чатах, смена кнопками",
       "/chats",
       "/export_csv [дней]"
     );
