@@ -245,29 +245,6 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   };
 }
 
-// Список моделей, которые отказали перед сработавшей.
-// Раньше /test молчал об этом: было видно только «Источник: cf-sdxl»,
-// а почему пропустили Gemini — приходилось гадать.
-function formatSkipped(attempts, usedProvider) {
-  if (!Array.isArray(attempts) || !attempts.length) return null;
-
-  // Пропуски по кулдауну не показываем: это внутренняя кухня бота,
-  // а не сбой. Остаются только настоящие ошибки моделей.
-  const failed = attempts.filter(
-    (a) => a && !a.ok && !a.skipped && a.provider !== usedProvider
-  );
-  if (!failed.length) return null;
-
-  const lines = failed.slice(0, 6).map((a) => {
-    const why = a.status
-      ? `HTTP ${a.status}`
-      : String(a.error || "ошибка").slice(0, 60);
-    return `  • <code>${escapeHtml(String(a.provider))}</code> — ${escapeHtml(why)}`;
-  });
-
-  return "Пропущены до неё:\n" + lines.join("\n");
-}
-
 
 
 
@@ -1011,9 +988,6 @@ export async function handleCommand(message, env, options = {}) {
         result.captionError
           ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
           : null,
-        // Показываем, какие модели отказали ДО сработавшей: без этого
-        // непонятно, почему выбранная в /models модель не применилась.
-        formatSkipped(result.attempts, result.provider),
         result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
       ].filter(Boolean).join("\n");
 
