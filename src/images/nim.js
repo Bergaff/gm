@@ -243,9 +243,12 @@ export const CF_PROVIDERS = [
  */
 export const GEMINI_PROVIDERS = [
   {
-    // Gemini 3 Pro Image — ЕДИНСТВЕННАЯ модель, официально поддерживающая
-    // русский язык (ru-RU) и заметно лучше рисующая текст на картинке.
-    // Документация Google: 2.5 Flash поддерживает только EN, es-MX, ja, zh, hi.
+    // Gemini 3 Pro Image — лучше всех рисует текст и знает русский, НО
+    // по таблице цен Google у него Free Tier = «Not available»: без
+    // включённого биллинга он всегда отдаёт ошибку и просто съедает
+    // один субреквест на каждой генерации. Поэтому по умолчанию скрыт.
+    // Включить обратно: секрет GEMINI_PRO=1
+    paidOnly: true,
     id: "gemini-3-pro",
     title: "Gemini 3 Pro Image (лучшее качество, знает русский)",
     gemini: true,
@@ -274,7 +277,13 @@ export const GEMINI_PROVIDERS = [
 ];
 
 function getGeminiProviders(env) {
-  return env && env.GEMINI_API_KEY ? GEMINI_PROVIDERS : [];
+  if (!env || !env.GEMINI_API_KEY) return [];
+
+  // Платные модели показываем, только если явно разрешили секретом
+  // GEMINI_PRO=1. Иначе они висят в списке, всегда падают и путают.
+  const allowPaid = String(env.GEMINI_PRO || "") === "1";
+
+  return GEMINI_PROVIDERS.filter((p) => allowPaid || !p.paidOnly);
 }
 
 
