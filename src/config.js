@@ -19,6 +19,10 @@ export const DEFAULT_SETTINGS = {
   weekdayPrompts: [],
   weekendPrompts: [],
 
+  // Стиль генерации: бот дописывает детали к короткому промпту.
+  // Список стилей — в src/styles.js
+  imageStyle: "photo",
+
   // Характер чата для генерации подписей нейросетью (/set_character)
   character: "",
   // Генерировать подписи через LLM или брать готовые фразы

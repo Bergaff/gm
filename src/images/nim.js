@@ -223,8 +223,22 @@ export const CF_PROVIDERS = [
  */
 export const GEMINI_PROVIDERS = [
   {
+    // Gemini 3 Pro Image — ЕДИНСТВЕННАЯ модель, официально поддерживающая
+    // русский язык (ru-RU) и заметно лучше рисующая текст на картинке.
+    // Документация Google: 2.5 Flash поддерживает только EN, es-MX, ja, zh, hi.
+    id: "gemini-3-pro",
+    title: "Gemini 3 Pro Image (лучшее качество, знает русский)",
+    gemini: true,
+    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    keyEnv: "GEMINI_API_KEY",
+    build: (prompt) => ({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ["IMAGE"] },
+    }),
+  },
+  {
     id: "gemini-image",
-    title: "Gemini 2.5 Flash Image (Google)",
+    title: "Gemini 2.5 Flash Image (быстрее, только английский)",
     gemini: true,
     url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
     keyEnv: "GEMINI_API_KEY",
@@ -326,7 +340,8 @@ async function callProvider(provider, prompt, env, apiKey) {
     const inline = parts.find((p) => p?.inlineData?.data)?.inlineData?.data;
 
     if (inline) {
-      await addUsage(env, 0, "image"); // у Gemini свой лимит, нейроны не тратятся
+      // У Gemini свой лимит (не нейроны) — считаем запросы отдельно.
+      await addUsage(env, 0, "gemini");
       return { ok: true, status: 200, latency, bytes: base64ToBytes(inline), seed };
     }
 
@@ -417,6 +432,8 @@ async function callProvider(provider, prompt, env, apiKey) {
   const base64 = extractBase64(payload);
 
   if (base64) {
+    // Учитываем запрос к NVIDIA отдельно от Cloudflare
+    if (!provider.custom && !provider.binding) await addUsage(env, 0, "nvidia");
     return { ok: true, status: 200, latency, bytes: base64ToBytes(base64), seed };
   }
 

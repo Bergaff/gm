@@ -20,6 +20,7 @@ import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
 import { localParts, parseTimeSpec } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
+import { applyStyle, stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 import {
   generateCaption,
   DEFAULT_CHARACTER,
@@ -110,6 +111,15 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     const tr = await translatePrompt(rawPrompt, env);
     activePrompt = tr.text;
     promptTranslated = tr.translated;
+  }
+
+  // Дописываем стиль: «кот на полу» -> «cat on the floor, professional
+  // photography, 85mm lens, ...». Если промпт уже развёрнутый — не трогаем.
+  let styleApplied = false;
+  if (useNim) {
+    const withStyle = applyStyle(activePrompt, settings.imageStyle);
+    styleApplied = withStyle !== activePrompt;
+    activePrompt = withStyle;
   }
 
   if (useNim) {
@@ -207,6 +217,8 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     promptTranslated,
     captionSource,
     captionError,
+    styleApplied,
+    styleId: settings.imageStyle,
     caption: text,
     assetName: image?.assetName || null,
   };
@@ -215,7 +227,7 @@ const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
   "/set_source", "/set_gdrive", "/refresh_gdrive",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
-  "/models", "/set_model", "/set_timezone",
+  "/models", "/set_model", "/set_timezone", "/style",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
   "/test", "/reset", "/cancel", "/diag", "/menu",
@@ -254,6 +266,7 @@ export function menuKeyboard() {
     inline_keyboard: [
       [
         { text: "🖼 Источник", callback_data: "nav|source" },
+        { text: "🎨 Стиль", callback_data: "nav|style" },
         { text: "🤖 Модели", callback_data: "nav|models" },
       ],
       [
@@ -744,6 +757,24 @@ export async function handleCommand(message, env, options = {}) {
       );
       return;
     }
+
+    case "/style": {
+      const s = await getSettings(chatId, env);
+      if (!value) {
+        await sendMessage(chatId, stylesText(s.imageStyle, escapeHtml), env, {
+          reply_markup: stylesKeyboard(s.imageStyle),
+        });
+        return;
+      }
+      if (!STYLES[value]) {
+        await sendMessage(chatId, "Неизвестный стиль. Откройте /style без аргументов.", env);
+        return;
+      }
+      await patchSettings(chatId, { imageStyle: value }, env);
+      await sendMessage(chatId, `✅ Стиль: <b>${getStyle(value).title}</b>`, env);
+      return;
+    }
+
 
     case "/menu": {
       await sendMessage(chatId, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, {
@@ -1267,6 +1298,7 @@ function helpText(role) {
     "",
     "<b>Модели и расписание</b>",
     "/models — выбор модели (кнопки)",
+    "/style — стиль картинок (кнопки)",
     "/set_timezone Europe/Moscow",
     "/set_weekday_time 09:00 или 09:00-09:40",
     "/set_weekend_time 10:30",
@@ -1321,6 +1353,7 @@ function settingsText(s, chatId, role) {
     `Источник: <b>${s.source}</b>`,
     `Google Drive: ${s.gdriveFolder ? "подключён ✅" : "не задан ❌"}`,
     `Модель NIM: <b>${s.nimModel}</b>`,
+    `Стиль: <b>${getStyle(s.imageStyle).title}</b>`,
     "",
     `Промпты будней: <b>${wd || "—"}</b>`,
     `Промпты выходных: <b>${we || "—"}</b>`,

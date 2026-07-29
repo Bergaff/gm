@@ -50,16 +50,27 @@ export function estimateTextNeurons(inputChars, outputChars) {
 
 // Прибавить расход за сегодня. Никогда не бросает исключение.
 export async function addUsage(env, neurons, kind = "other") {
-  if (!env?.BOT_KV || !neurons || neurons <= 0) return;
+  // ВАЖНО: neurons может быть 0 — у Gemini и NVIDIA свои лимиты,
+  // и мы считаем их запросы, а не нейроны. Раньше нулевой расход
+  // отсекался этой проверкой, и счётчики оставались пустыми.
+  if (!env?.BOT_KV) return;
+  if (!neurons && kind !== "gemini" && kind !== "nvidia") return;
+  if (neurons < 0) return;
 
   try {
     const key = dayKey();
-    const cur = (await env.BOT_KV.get(key, "json")) || { total: 0, image: 0, text: 0, calls: 0 };
+    const cur = (await env.BOT_KV.get(key, "json")) ||
+      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
 
     cur.total += neurons;
     cur.calls += 1;
+
+    // Cloudflare тратит нейроны, у Gemini и NVIDIA свои лимиты —
+    // их считаем в запросах, а не в нейронах.
     if (kind === "image") cur.image += neurons;
     else if (kind === "text") cur.text += neurons;
+    else if (kind === "gemini") cur.gemini = (cur.gemini || 0) + 1;
+    else if (kind === "nvidia") cur.nvidia = (cur.nvidia || 0) + 1;
 
     // Держим 8 дней, чтобы показывать историю за неделю
     await env.BOT_KV.put(key, JSON.stringify(cur), { expirationTtl: 8 * 86400 });
@@ -71,9 +82,9 @@ export async function addUsage(env, neurons, kind = "other") {
 export async function getUsage(env, offsetDays = 0) {
   try {
     const data = await env.BOT_KV.get(dayKey(offsetDays), "json");
-    return data || { total: 0, image: 0, text: 0, calls: 0 };
+    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
   } catch {
-    return { total: 0, image: 0, text: 0, calls: 0 };
+    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
   }
 }
 
@@ -140,10 +151,16 @@ export async function usageText(env, escapeHtml) {
     "",
     `Хватит ещё примерно на <b>${postsLeft}</b> постов`,
     "",
-    "<b>Сегодня по типам</b>",
-    `🖼 картинки: ${Math.round(today.image)}`,
-    `💬 текст: ${Math.round(today.text)}`,
+    "<b>Cloudflare сегодня</b>",
+    `🖼 картинки: ${Math.round(today.image)} нейронов`,
+    `💬 текст: ${Math.round(today.text)} нейронов`,
     `📞 вызовов: ${today.calls}`,
+    "",
+    "<b>Другие провайдеры</b>",
+    `🍌 Gemini: ${today.gemini || 0} картинок` +
+      (today.gemini ? " (свой лимит ~500/сутки)" : ""),
+    `🟢 NVIDIA: ${today.nvidia || 0} картинок` +
+      (today.nvidia ? " (расход кредитов)" : ""),
   ];
 
   const history = await getUsageHistory(env, 7);

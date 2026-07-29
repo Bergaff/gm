@@ -16,6 +16,7 @@ import { getSettings, patchSettings } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
 import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
+import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 
 export async function handleCallback(query, env) {
   const data = query.data || "";
@@ -69,6 +70,9 @@ export async function handleCallback(query, env) {
       await editMessage(chatId, mid, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, menuKeyboard());
     } else if (screen === "source") {
       await editMessage(chatId, mid, "🖼 <b>Источник картинок</b>", env, sourceKeyboard(s.source));
+    } else if (screen === "style") {
+      await editMessage(chatId, mid, stylesText(s.imageStyle, (t) => String(t)), env,
+        stylesKeyboard(s.imageStyle));
     } else if (screen === "models") {
       let stats = {};
       try { stats = await votesByProvider(env, chatId); } catch { stats = {}; }
@@ -110,6 +114,23 @@ export async function handleCallback(query, env) {
         await answerCallback(query.id, `Источник: ${value}`, env);
         return;
       }
+
+      if (field === "style") {
+        if (!STYLES[value]) {
+          await answerCallback(query.id, "Неизвестный стиль", env, true);
+          return;
+        }
+        await patchSettings(chatId, { imageStyle: value }, env);
+        await editMessage(
+          chatId, query.message.message_id,
+          stylesText(value, (t) => String(t)),
+          env,
+          stylesKeyboard(value)
+        );
+        await answerCallback(query.id, getStyle(value).title, env);
+        return;
+      }
+
 
       if (field === "model") {
         await patchSettings(chatId, { nimModel: value }, env);
