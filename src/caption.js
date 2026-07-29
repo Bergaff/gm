@@ -29,7 +29,9 @@ async function generateViaCfBinding(env, messages) {
   const out = await env.AI.run(String(env.TEXT_API_MODEL || CF_TEXT_MODEL), {
     messages,
     temperature: 1.0,
-    max_tokens: 250,
+    // Кириллица у llama «дорогая»: ~1 токен на 1.2 символа. При 250 токенах
+    // текст обрывался ровно на границе, на полуслове. Даём запас.
+    max_tokens: 500,
   });
   const text = String(out?.response || out?.result?.response || "").trim();
 
@@ -144,6 +146,13 @@ function buildPrompt(character, isWeekend, chatTitle) {
         "ЗАПРЕЩЕНО писать безликие штампы вроде «Пусть день будет " +
         "продуктивным», «Начинаем день на позитиве», «Отличного дня». " +
         "Такие фразы — провал задачи.\n\n" +
+        "ЯЗЫК: пиши СТРОГО на русском языке, кириллицей. Ни одного слова " +
+        "и ни одного символа на английском, китайском, арабском или любом " +
+        "другом языке. Латиница допустима только в общепринятых названиях " +
+        "(Python, Telegram). Текст с иероглифами или вставками вроде " +
+        "«myself» — провал задачи.\n\n" +
+        "Закончи мысль до конца: последнее предложение должно быть " +
+        "завершённым, с точкой. Лучше короче, чем оборвать на полуслове.\n\n" +
         "Верни ТОЛЬКО текст приветствия.",
     },
     {
@@ -166,8 +175,61 @@ function cleanup(text) {
   // только первый абзац
   out = out.split(/\n{2,}/)[0].trim();
 
-  if (out.length > 400) out = out.slice(0, 397).trimEnd() + "…";
+  // Обрезаем по последнему законченному предложению, а не по символу:
+  // иначе подпись обрывалась на полуслове («профессиональной денонсаци»).
+  out = trimToSentence(out, 400);
+
   return out;
+}
+
+// Обрезка до последнего законченного предложения.
+// Текст не должен обрываться на полуслове: либо режем по точке,
+// либо ставим многоточие, чтобы обрыв выглядел намеренным.
+function trimToSentence(text, limit) {
+  const out = String(text || "").trim();
+  const head = out.length > limit ? out.slice(0, limit) : out;
+
+  // Уже заканчивается нормально — ничего не делаем
+  if (out.length <= limit && /[.!?…»)]$/.test(head)) return head;
+
+  const lastEnd = Math.max(head.lastIndexOf("."), head.lastIndexOf("!"),
+                           head.lastIndexOf("?"), head.lastIndexOf("…"));
+
+  // Режем по последней точке, только если остаётся хотя бы 60% текста
+  if (lastEnd >= 0 && lastEnd + 1 >= head.length * 0.6) {
+    return head.slice(0, lastEnd + 1).trim();
+  }
+
+  // Иначе — обрываем по последнему целому слову и ставим многоточие
+  const cut = head.replace(/\s+\S*$/, "").trimEnd();
+  return (cut || head.trimEnd()).replace(/[,;:\s]+$/, "") + "…";
+}
+
+/**
+ * Проверка качества подписи ПЕРЕД отправкой в чат.
+ *
+ * Модель llama-3.1-8b при temperature 1.0 иногда «сползает» на другие
+ * языки прямо посреди русской фразы: «обещаю myself все今天 …».
+ * Такой текст лучше не показывать — пусть сработает запасной вариант.
+ *
+ * Возвращает null, если всё хорошо, или причину брака строкой.
+ */
+export function captionProblem(text) {
+  const out = String(text || "").trim();
+  if (!out) return "пустой ответ";
+
+  // Иероглифы, арабица, иврит, деванагари — в русской подписи их быть не может
+  const foreign = out.match(/[\u4E00-\u9FFF\u3040-\u30FF\u0600-\u06FF\u0590-\u05FF\u0900-\u097F]/g);
+  if (foreign) return `чужие символы: ${[...new Set(foreign)].join("")}`;
+
+  const letters = out.match(/\p{L}/gu) || [];
+  if (!letters.length) return "нет букв";
+
+  const cyrillic = out.match(/[\u0400-\u04FF]/g) || [];
+  // Подпись должна быть русской: кириллицы минимум 80% букв
+  if (cyrillic.length / letters.length < 0.8) return "текст не на русском";
+
+  return null;
 }
 
 /**
@@ -189,13 +251,16 @@ export async function generateCaption(env, options = {}) {
   const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
 
   if (preferCf) {
-    try {
-      const text = cleanup(await generateViaCfBinding(env, messages));
-      if (text) {
-        return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
-                 latency: Date.now() - started };
-      }
-      lastError = "Workers AI вернул пустой ответ";
+      try {
+        const text = cleanup(await generateViaCfBinding(env, messages));
+        const problem = captionProblem(text);
+        if (text && !problem) {
+          return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+                   latency: Date.now() - started };
+        }
+        return { ok: false, error: problem
+          ? `Workers AI выдал брак (${problem})`
+          : "Workers AI вернул пустой ответ" };
     } catch (e) {
       lastError = "Workers AI: " + String(e?.message || e).slice(0, 150);
     }
@@ -235,7 +300,8 @@ export async function generateCaption(env, options = {}) {
           // presence_penalty гонит модель от заезженных формулировок
           presence_penalty: 0.6,
           frequency_penalty: 0.3,
-          max_tokens: 250,
+          // см. комментарий про кириллицу выше
+          max_tokens: 500,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
@@ -258,6 +324,14 @@ export async function generateCaption(env, options = {}) {
         return { ok: false, error: "пустой ответ модели", latency: Date.now() - started };
       }
 
+      // Модель могла сползти на другой язык — тогда пробуем следующий
+      // ключ, а не отдаём в чат текст с иероглифами.
+      const problem = captionProblem(text);
+      if (problem) {
+        lastError = `модель выдала брак (${problem})`;
+        continue;
+      }
+
       return {
         ok: true,
         text,
@@ -274,7 +348,7 @@ export async function generateCaption(env, options = {}) {
   if (env.AI) {
     try {
       const text = cleanup(await generateViaCfBinding(env, messages));
-      if (text) {
+      if (text && !captionProblem(text)) {
         return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
                  latency: Date.now() - started, fallback: true };
       }
