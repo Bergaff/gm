@@ -68,14 +68,31 @@ export async function listChats(env) {
   const chats = [];
   let cursor;
 
-  do {
-    const page = await env.BOT_KV.list({ prefix: "chat:", cursor });
-    for (const key of page.keys) {
+  // ЗАЩИТА ОТ ВЕЧНОГО ЦИКЛА.
+  // KV.list() не всегда ведёт себя так, как ждёт наивный do/while:
+  // может вернуть тот же cursor, не выставить list_complete или отдать
+  // пустую страницу. Цикл тогда крутится бесконечно, воркер убивают
+  // по таймауту — и команда молча не отвечает (/chats, /change).
+  // Страховки три: лимит страниц, проверка на повтор cursor и
+  // остановка на пустой странице.
+  const MAX_PAGES = 20;
+  let seen = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await env.BOT_KV.list({ prefix: "chat:", cursor });
+
+    for (const key of res.keys || []) {
       chats.push(key.name.replace("chat:", ""));
     }
-    cursor = page.cursor;
-    if (page.list_complete) break;
-  } while (cursor);
+
+    if (res.list_complete) break;
+    if (!res.cursor) break;              // некуда идти дальше
+    if (res.cursor === seen) break;      // cursor не сдвинулся
+    if (!(res.keys || []).length) break; // пустая страница
+
+    seen = res.cursor;
+    cursor = res.cursor;
+  }
 
   return chats;
 }

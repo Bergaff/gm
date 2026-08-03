@@ -666,7 +666,12 @@ export async function generateImage(prompt, env, options = {}) {
       };
     }
 
-    await markFailed(provider.id, env, result.status, result.error);
+    // noFallback = это /nim_health, то есть диагностика. Она не должна
+    // загонять модели в кулдаун: иначе сама проверка выключает половину
+    // пула на 5-30 минут, и следующая генерация идёт мимо рабочих моделей.
+    if (!noFallback) {
+      await markFailed(provider.id, env, result.status, result.error);
+    }
   }
 
   return { ok: false, attempts };

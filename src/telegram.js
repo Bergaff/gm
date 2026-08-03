@@ -39,6 +39,62 @@ export function sendPhotoUrl(chatId, url, caption, env, extra = {}) {
   );
 }
 
+
+/**
+ * Отправка медиа из Google Drive: фото, GIF или видео.
+ *
+ * Раньше всё уходило через sendPhoto с типом image/jpeg — из-за этого
+ * GIF приходил статичной картинкой, а видео Telegram отклонял.
+ * Метод и MIME-тип теперь подбираются под сам файл.
+ */
+export async function sendMediaBytes(chatId, bytes, caption, env, options = {}) {
+  const { kind = "photo", mimeType = "", filename = "", reply_markup } = options;
+
+  const method =
+    kind === "animation" ? "sendAnimation" :
+    kind === "video" ? "sendVideo" : "sendPhoto";
+
+  const field =
+    kind === "animation" ? "animation" :
+    kind === "video" ? "video" : "photo";
+
+  const defaultType =
+    kind === "animation" ? "image/gif" :
+    kind === "video" ? "video/mp4" : "image/jpeg";
+
+  const defaultName =
+    kind === "animation" ? "morning.gif" :
+    kind === "video" ? "morning.mp4" : "morning.jpg";
+
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("caption", caption || "");
+  form.append("parse_mode", "HTML");
+
+  if (reply_markup) {
+    form.append("reply_markup", JSON.stringify(reply_markup));
+  }
+
+  form.append(
+    field,
+    new Blob([bytes], { type: mimeType || defaultType }),
+    filename || defaultName
+  );
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
+    { method: "POST", body: form }
+  );
+
+  const result = await response.json().catch(() => ({ ok: false }));
+
+  if (!result.ok) {
+    console.log(`TG ${method} error:`, JSON.stringify(result).slice(0, 500));
+  }
+
+  return result;
+}
+
 export async function sendPhotoBytes(chatId, bytes, caption, env, extra = {}) {
   const form = new FormData();
 

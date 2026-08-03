@@ -4,7 +4,7 @@ import {
   WEEKEND_MESSAGES,
   DAY_MESSAGES,
 } from "./config.js";
-import { sendMessage, sendPhotoBytes, escapeHtml, tg, editMessage } from "./telegram.js";
+import { sendMessage, sendPhotoBytes, sendMediaBytes, escapeHtml, tg, editMessage } from "./telegram.js";
 import { getSettings, patchSettings, registerChat, listChats } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
@@ -220,23 +220,51 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 
   if (image) {
     const markup = settings.votingEnabled ? voteKeyboard(postId) : undefined;
-    const sent = await sendPhotoBytes(chatId, image.bytes, caption, env, {
+
+    // Из Google Drive может прийти GIF или видео — им нужны
+    // sendAnimation / sendVideo, иначе анимация станет картинкой.
+    const sent = await sendMediaBytes(chatId, image.bytes, caption, env, {
+      kind: image.kind || "photo",
+      mimeType: image.mimeType || "",
+      filename: image.assetName || "",
       reply_markup: markup,
     });
 
     if (sent.ok) {
       messageId = sent.result.message_id;
+      // У каждого типа file_id лежит в своём поле
       const photos = sent.result.photo || [];
-      tgFileId = photos[photos.length - 1]?.file_id || null;
+      tgFileId =
+        photos[photos.length - 1]?.file_id ||
+        sent.result.animation?.file_id ||
+        sent.result.video?.file_id ||
+        sent.result.document?.file_id ||
+        null;
     } else {
       status = "tg_error";
       error = JSON.stringify(sent).slice(0, 300);
     }
   } else {
     status = "no_image";
+
+    // Раньше причина была видна только в /test. В обычной рассылке
+    // приходило глухое «не удалось», и было непонятно, что чинить.
+    let hint = "";
+    if (!settings.gdriveFolder && settings.source !== "nim") {
+      hint = "\n<i>Источник не настроен: /set_source nim или /set_gdrive</i>";
+    } else if (attempts.some((a) => a.status === 429 ||
+               /limit|quota|exceed/i.test(String(a.error || "")))) {
+      hint = "\n<i>Похоже, кончился дневной лимит Workers AI — /usage</i>";
+    } else if (attempts.length) {
+      const first = attempts.find((a) => !a.ok);
+      if (first) {
+        hint = `\n<i>${escapeHtml(String(first.error || "").slice(0, 120))}</i>`;
+      }
+    }
+
     const sent = await sendMessage(
       chatId,
-      `${caption}\n\n<i>⚠️ Картинку получить не удалось</i>`,
+      `${caption}\n\n<i>⚠️ Картинку получить не удалось</i>${hint}`,
       env
     );
     if (sent.ok) messageId = sent.result.message_id;
@@ -359,18 +387,49 @@ export async function changeKeyboard(env, listChats, getSettings, page = 0) {
 // Экран выбора модели для КОНКРЕТНОГО чата (по его id)
 export function changeModelsKeyboard(env, targetId, current) {
   const providers = getAllProviders(env);
-  const rows = providers.map((p, i) => [{
-    text: `${p.id === current ? "✅ " : ""}Модель ${i + 1} — ${p.title.slice(0, 28)}`,
-    callback_data: `c|set|${targetId}|${p.id}`,
-  }]);
+
+  // Номера в два столбца: с 6 моделями экран помещается целиком,
+  // не надо листать список из полноразмерных кнопок.
+  const rows = [];
+  for (let i = 0; i < providers.length; i += 2) {
+    rows.push(
+      providers.slice(i, i + 2).map((p, j) => ({
+        text: `${p.id === current ? "✅ " : ""}${i + j + 1}. ${p.title.slice(0, 22)}`,
+        callback_data: `c|set|${targetId}|${p.id}`,
+      }))
+    );
+  }
 
   rows.unshift([{
-    text: `${current === "auto" ? "✅ " : ""}🎲 Авто (перебор всех)`,
+    text: `${current === "auto" ? "✅ " : ""}🎲 Случайно (перебор всех)`,
     callback_data: `c|set|${targetId}|auto`,
   }]);
 
   rows.push([{ text: "◀️ К списку чатов", callback_data: "c|list|-" }]);
   return { inline_keyboard: rows };
+}
+
+// Текст экрана выбора модели для конкретного чата: видно, что есть что.
+export function changeModelsText(env, title, current) {
+  const providers = getAllProviders(env);
+  const lines = [`🔧 <b>${title}</b>`, ""];
+
+  lines.push(current === "auto"
+    ? "Сейчас: <b>🎲 Случайно</b> — бот перебирает модели сам"
+    : "Сейчас: <b>" + (() => {
+        const i = providers.findIndex((p) => p.id === current);
+        return i >= 0 ? `${i + 1}. ${providers[i].title}` : current;
+      })() + "</b>");
+
+  lines.push("");
+  providers.forEach((p, i) => {
+    lines.push(`${p.id === current ? "✅ " : ""}<b>${i + 1}.</b> ${p.title}`);
+  });
+
+  lines.push("");
+  lines.push("<i>Участники чата этого не увидят.</i>");
+
+  return lines.join("\n");
 }
 
 
@@ -866,7 +925,14 @@ export async function handleCommand(message, env, options = {}) {
       }
       try {
         const files = await listImages(folderId, env, true);
-        await sendMessage(chatId, `♻️ Кэш обновлён. Изображений: <b>${files.length}</b>`, env);
+        const gifs = files.filter((f) => f.mimeType === "image/gif").length;
+        const vids = files.filter((f) => String(f.mimeType).startsWith("video/")).length;
+        await sendMessage(
+          chatId,
+          `♻️ Кэш обновлён. Файлов: <b>${files.length}</b>\n` +
+            `картинки ${files.length - gifs - vids} · GIF ${gifs} · видео ${vids}`,
+          env
+        );
       } catch (e) {
         await sendMessage(chatId, `❌ <code>${escapeHtml(String(e).slice(0, 300))}</code>`, env);
       }
@@ -1330,8 +1396,13 @@ async function runDiagnostics(chatId, env) {
     lines.push(`папка: <code>${escapeHtml(folderId)}</code>`);
     try {
       const files = await listImages(folderId, env, true);
-      lines.push(`✅ доступна, изображений: <b>${files.length}</b>`);
-      if (!files.length) lines.push("⚠️ в папке нет картинок");
+      const gifs = files.filter((f) => f.mimeType === "image/gif").length;
+      const vids = files.filter((f) => String(f.mimeType).startsWith("video/")).length;
+      const pics = files.length - gifs - vids;
+
+      lines.push(`✅ доступна, файлов: <b>${files.length}</b>`);
+      lines.push(`   картинки ${pics} · GIF ${gifs} · видео ${vids}`);
+      if (!files.length) lines.push("⚠️ в папке нет подходящих файлов");
     } catch (e) {
       lines.push(`❌ ${escapeHtml(String(e.message || e).slice(0, 300))}`);
     }

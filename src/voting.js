@@ -14,6 +14,7 @@ import {
   changeText,
   changeKeyboard,
   changeModelsKeyboard,
+  changeModelsText,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -92,7 +93,7 @@ export async function handleCallback(query, env) {
       const st = await getSettings(targetId, env);
       await editMessage(
         chatId, mid,
-        `🔧 <b>${escapeHtml(st.title || targetId)}</b>\n\nВыберите модель:`,
+        changeModelsText(env, escapeHtml(st.title || targetId), st.nimModel),
         env,
         changeModelsKeyboard(env, targetId, st.nimModel)
       );
@@ -106,7 +107,7 @@ export async function handleCallback(query, env) {
 
       await editMessage(
         chatId, mid,
-        `🔧 <b>${escapeHtml(st.title || targetId)}</b>\n\nВыберите модель:`,
+        changeModelsText(env, escapeHtml(st.title || targetId), value),
         env,
         changeModelsKeyboard(env, targetId, value)
       );

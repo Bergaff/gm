@@ -1,5 +1,10 @@
 const LIST_CACHE_TTL = 6 * 60 * 60;
+
+// Telegram: фото до 10 МБ, видео и анимации до 50 МБ при загрузке
+// файлом. Для видео берём с запасом 5 МБ — большие ролики долго
+// качаются с Drive, а у воркера всего 30 секунд на весь запрос.
 const MAX_TELEGRAM_PHOTO = 9.5 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
 
 export function parseFolderId(input) {
   if (!input) return null;
@@ -77,9 +82,10 @@ export async function listImages(folderId, env, force = false) {
     if (cached?.files?.length) return cached.files;
   }
 
+  // Раньше искались только image/ — видео из папки бот вообще не видел.
   const query = [
     `'${folderId}' in parents`,
-    "mimeType contains 'image/'",
+    "(mimeType contains 'image/' or mimeType contains 'video/')",
     "trashed = false",
   ].join(" and ");
 
@@ -103,7 +109,10 @@ export async function listImages(folderId, env, force = false) {
 
   const files = (data.files || []).filter((file) => {
     const size = Number(file.size || 0);
-    return size === 0 || size <= MAX_TELEGRAM_PHOTO;
+    if (size === 0) return true; // размер неизвестен — пробуем
+
+    // У видео и GIF свой лимит: они уходят другим методом Telegram
+    return size <= (isMotion(file.mimeType) ? MAX_VIDEO_BYTES : MAX_TELEGRAM_PHOTO);
   });
 
   await env.BOT_KV.put(
@@ -153,6 +162,21 @@ export async function downloadImage(fileId, env) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+// GIF и видео — «движущиеся» файлы, их нельзя слать через sendPhoto:
+// Telegram превратит GIF в статичную картинку, а видео не примет вовсе.
+export function isMotion(mimeType) {
+  const m = String(mimeType || "").toLowerCase();
+  return m === "image/gif" || m.startsWith("video/");
+}
+
+// Каким методом Telegram отправлять файл
+export function telegramKind(mimeType) {
+  const m = String(mimeType || "").toLowerCase();
+  if (m === "image/gif") return "animation";
+  if (m.startsWith("video/")) return "video";
+  return "photo";
+}
+
 export async function getGdriveImage(chatId, folderId, env, avoidLast) {
   const started = Date.now();
   const file = await pickImage(chatId, folderId, env, avoidLast);
@@ -165,6 +189,9 @@ export async function getGdriveImage(chatId, folderId, env, avoidLast) {
     model: "google-drive",
     assetRef: file.id,
     assetName: file.name,
+    // Тип нужен, чтобы выбрать sendPhoto / sendAnimation / sendVideo
+    mimeType: file.mimeType || "",
+    kind: telegramKind(file.mimeType),
     latency: Date.now() - started,
   };
 }
