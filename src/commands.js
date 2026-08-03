@@ -48,6 +48,12 @@ import {
   needsTranslation,
 } from "./caption.js";
 
+// Лимит описания характера чата.
+// Было 2000 — развёрнутая характеристика на 2300 символов обрезалась
+// прямо посреди предложения, и модель теряла последний абзац.
+// 4000 спокойно вмещает подробное описание и не раздувает промпт.
+const CHARACTER_LIMIT = 4000;
+
 function pick(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
@@ -179,7 +185,6 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       chatId,
       negative,
     });
-
     attempts = result.attempts || [];
     if (result.ok) image = result;
     else error = "Все модели NIM недоступны";
@@ -310,7 +315,6 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 }
 
 
-
 // ── /change — владелец видит модели во ВСЕХ чатах и меняет их ─────────
 // Обычные команды правят только тот чат, где отправлены. Здесь владелец
 // работает с любым чатом, не заходя в него.
@@ -431,7 +435,6 @@ export function changeModelsText(env, title, current) {
 
   return lines.join("\n");
 }
-
 
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
@@ -585,7 +588,6 @@ export function promptsText(settings, kind) {
   return lines.join("\n");
 }
 
-
 // Пользователь прислал .txt — читаем как «характер чата».
 export async function handleDocument(message, env, options = {}) {
   const { isChannelPost = false } = options;
@@ -677,7 +679,7 @@ export async function handleDocument(message, env, options = {}) {
 
   await patchSettings(
     chatId,
-    { character: content.slice(0, 2000), aiCaptions: true },
+    { character: content.slice(0, CHARACTER_LIMIT), aiCaptions: true },
     env
   );
   if (userId) await clearPending(chatId, userId, env);
@@ -686,7 +688,7 @@ export async function handleDocument(message, env, options = {}) {
     chatId,
     [
       `✅ Характер чата загружен из <code>${escapeHtml(name)}</code>`,
-      `Символов: <b>${Math.min(content.length, 2000)}</b>`,
+      `Символов: <b>${Math.min(content.length, CHARACTER_LIMIT)}</b>`,
       "",
       `<i>${escapeHtml(content.slice(0, 200))}${content.length > 200 ? "…" : ""}</i>`,
       "",
@@ -695,9 +697,6 @@ export async function handleDocument(message, env, options = {}) {
     env
   );
 }
-
-
-
 
 export async function handleCommand(message, env, options = {}) {
   const { isChannelPost = false } = options;
@@ -963,7 +962,9 @@ export async function handleCommand(message, env, options = {}) {
         );
         return;
       }
-      if (body.length < 5) {
+      // Спрашиваем отдельным сообщением, только если текста нет совсем.
+      // Раньше порог < 5 отклонял короткие, но осмысленные промпты («горы»).
+      if (!body) {
         await setPending(chatId, userId, `add_prompt_${kind}`, env);
         await sendMessage(chatId, PENDING_PROMPTS[`add_prompt_${kind}`], env);
         return;
@@ -1007,9 +1008,6 @@ export async function handleCommand(message, env, options = {}) {
       await editPrompt(kind, num - 1, newText, chatId, env);
       return;
     }
-
-
-
 
     case "/del_prompt": {
       const parts = value.split(/\s+/);
@@ -1079,7 +1077,6 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
-
     case "/menu": {
       await sendMessage(chatId, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, {
         reply_markup: menuKeyboard(),
@@ -1112,13 +1109,13 @@ export async function handleCommand(message, env, options = {}) {
       // пока пользователь не вспомнит про /ai_on. Включаем сразу.
       await patchSettings(
         chatId,
-        { character: value.slice(0, 2000), aiCaptions: true },
+        { character: value.slice(0, CHARACTER_LIMIT), aiCaptions: true },
         env
       );
       await sendMessage(
         chatId,
-        `✅ Характер чата сохранён (${Math.min(value.length, 2000)} симв.).` +
-          (value.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
+        `✅ Характер чата сохранён (${Math.min(value.length, CHARACTER_LIMIT)} симв.).` +
+          (value.length > CHARACTER_LIMIT ? `\n⚠️ Текст обрезан до ${CHARACTER_LIMIT} символов.` : "") +
           "\n\n🤖 Генерация подписей <b>включена автоматически</b>.\n" +
           "Выключить: /ai_off · Проверить: /test",
         env
@@ -1140,7 +1137,6 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
-
     case "/set_model": {
       if (!value) {
         const s = await getSettings(chatId, env);
@@ -1159,14 +1155,34 @@ export async function handleCommand(message, env, options = {}) {
     }
 
     case "/set_timezone": {
+      const tzHelp = [
+        "🌍 <b>Часовой пояс</b>",
+        "",
+        "Пробелы заменяются на <b>подчёркивание</b>:",
+        "<code>/set_timezone America/New_York</code>",
+        "<code>/set_timezone America/Los_Angeles</code>",
+        "<code>/set_timezone America/Sao_Paulo</code>",
+        "<code>/set_timezone Europe/Moscow</code>",
+        "<code>/set_timezone Europe/Minsk</code>",
+        "<code>/set_timezone Asia/Almaty</code>",
+        "",
+        "<i>«America/New York» с пробелом не сработает — нужно New_York.</i>",
+      ].join("\n");
+
       if (!value) {
-        await sendMessage(chatId, "Пример: <code>/set_timezone Europe/Moscow</code>", env);
+        await sendMessage(chatId, tzHelp, env);
         return;
       }
       try {
         new Intl.DateTimeFormat("en", { timeZone: value });
       } catch {
-        await sendMessage(chatId, "Не распознал пояс. Пример: <code>/set_timezone Europe/Moscow</code>", env);
+        await sendMessage(
+          chatId,
+          `❌ Пояс <code>${escapeHtml(value)}</code> не распознан.\n\n` +
+            (value.includes(" ") ? "Похоже, в названии пробел — замените его на <b>_</b>\n\n" : "") +
+            tzHelp,
+          env
+        );
         return;
       }
       await patchSettings(chatId, { timezone: value }, env);
@@ -1219,6 +1235,8 @@ export async function handleCommand(message, env, options = {}) {
 
       const willUseNim =
         s.source === "nim" || (s.source === "mixed" && true);
+      // Выбираем промпт ОДИН раз и передаём в sendMorning,
+      // иначе показ и генерация разойдутся.
       const preview = pickPrompt(s, localParts(s.timezone).isWeekend);
 
       // Одно служебное сообщение на весь тест: сначала «Готовлю…»,
@@ -1238,7 +1256,7 @@ export async function handleCommand(message, env, options = {}) {
           !s.aiCaptions && s.character
             ? "⚠️ <b>Характер задан, но подписи выключены!</b> Включить: /ai_on"
             : null,
-        ].filter(Boolean).join("\n"),
+        ].join("\n"),
         env
       );
 
@@ -1251,7 +1269,7 @@ export async function handleCommand(message, env, options = {}) {
         `Статус: <code>${result.status}</code>`,
         result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
         result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
-         result.promptOriginal
+        result.promptOriginal
           ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal))}</i>`
           : null,
         result.prompt
@@ -1314,17 +1332,16 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "add_prompt_weekend":
       return addPrompt("weekend", text, chatId, env);
 
-
     case "set_character": {
       await patchSettings(
         chatId,
-        { character: text.slice(0, 2000), aiCaptions: true },
+        { character: text.slice(0, CHARACTER_LIMIT), aiCaptions: true },
         env
       );
       await sendMessage(
         chatId,
-        `✅ Характер чата сохранён (${Math.min(text.length, 2000)} симв.).` +
-          (text.length > 2000 ? "\n⚠️ Текст обрезан до 2000 символов." : "") +
+        `✅ Характер чата сохранён (${Math.min(text.length, CHARACTER_LIMIT)} симв.).` +
+          (text.length > CHARACTER_LIMIT ? `\n⚠️ Текст обрезан до ${CHARACTER_LIMIT} символов.` : "") +
           "\n\n🤖 Генерация подписей <b>включена автоматически</b>.\n" +
           "Выключить: /ai_off · Проверить: /test",
         env
@@ -1345,7 +1362,6 @@ async function applyPendingValue(pending, text, chatId, env) {
     }
   }
 }
-
 
 // Проверяет всё, что нужно для работы, и показывает что именно сломано.
 async function runDiagnostics(chatId, env) {
@@ -1426,9 +1442,6 @@ async function runDiagnostics(chatId, env) {
   await sendMessage(chatId, lines.join("\n"), env);
 }
 
-
-
-
 async function applyGdrive(value, chatId, env) {
   const folderId = parseFolderId(value);
   if (!folderId) {
@@ -1449,10 +1462,10 @@ async function applyGdrive(value, chatId, env) {
       env
     );
   } catch (e) {
+    // Текст ошибки уже содержит конкретную причину и подсказку (см. gdrive.js)
     await sendMessage(
       chatId,
-      `❌ Не удалось прочитать папку.\n<code>${escapeHtml(String(e).slice(0, 300))}</code>\n\n` +
-        "Проверьте: доступ «Все, у кого есть ссылка» и что ключ Google поддерживает Drive API.",
+      `❌ Не удалось прочитать папку.\n\n${escapeHtml(String(e.message || e).slice(0, 400))}`,
       env
     );
   }
@@ -1555,8 +1568,6 @@ export async function editPrompt(kind, index, newText, chatId, env) {
   );
 }
 
-
-
 export async function deletePrompt(kind, index, chatId, env) {
   const s = await getSettings(chatId, env);
   const field = kind === "weekend" ? "weekendPrompts" : "weekdayPrompts";
@@ -1594,6 +1605,7 @@ function helpText(role) {
     `Ваша роль: <b>${roleLabel(role)}</b>`,
     "",
     "<b>Настройки этого чата</b>",
+    "/menu — меню с кнопками",
     "/settings — текущая конфигурация",
     "/set_source — источник картинок (кнопки)",
     "/set_gdrive — папка Google Drive",
