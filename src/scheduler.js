@@ -1,5 +1,6 @@
 import { getSettings, listChats } from "./storage.js";
 import { sendMorning } from "./commands.js";
+import { holidayName } from "./holidays.js";
 
 export function localParts(timeZone) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -19,12 +20,20 @@ export function localParts(timeZone) {
   }
 
   const weekday = map.weekday; // Mon, Tue, ... Sun
+  const date = `${map.year}-${map.month}-${map.day}`;
+  const holiday = holidayName(date);
+  const calendarWeekend = ["Sat", "Sun"].includes(weekday);
 
   return {
-    date: `${map.year}-${map.month}-${map.day}`,
+    date,
     hour: Number(map.hour) % 24,
     minute: Number(map.minute),
-    isWeekend: ["Sat", "Sun"].includes(weekday),
+    // Праздники считаем выходными для расписания и подписи:
+    // 1 января не должен звучать как обычный рабочий день.
+    isWeekend: calendarWeekend || Boolean(holiday),
+    calendarWeekend,
+    isHoliday: Boolean(holiday),
+    holidayName: holiday,
 
     // День недели нужен подписям: раньше их знание ограничивалось
     // «будни/выходные», и во вторник модель писала про понедельник.

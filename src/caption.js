@@ -179,10 +179,12 @@ const DAY_HINTS = {
 // Не всегда: иначе каждый понедельник будет об одном и том же.
 const DAY_MENTION_CHANCE = 0.5;
 
-function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "") {
-  const base = isWeekend
-    ? "выходной — отдых, никакой работы, можно поспать"
-    : "будний рабочий день — дела, задачи, дедлайны";
+function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "") {
+  const base = holiday
+    ? `праздник «${holiday}» — выходной, никакой работы, можно отдыхать`
+    : isWeekend
+      ? "выходной — отдых, никакой работы, можно поспать"
+      : "будний рабочий день — дела, задачи, дедлайны";
 
   const hint = DAY_HINTS[weekday];
   const mentionDay = hint && Math.random() < DAY_MENTION_CHANCE;
@@ -229,7 +231,10 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
         "«myself» — провал задачи.\n\n" +
         "Закончи мысль до конца: последнее предложение должно быть " +
         "завершённым, с точкой. Лучше короче, чем оборвать на полуслове.\n\n" +
-        dayRule(weekday, mentionDay) +
+        (holiday
+          ? `ПРАЗДНИК: сегодня ${holiday}. Это выходной, не называй его рабочим днём и не пиши про дедлайны/офис как обязательные дела.\n\n`
+          : "") +
+        dayRule(weekday, mentionDay && !holiday) +
         exampleBlock(examples) +
         "Верни ТОЛЬКО текст приветствия.",
     },
@@ -341,12 +346,13 @@ export async function generateCaption(env, options = {}) {
     chatTitle = "",
     examples = [],
     weekday = "",
+    holidayName = "",
   } = options;
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
   const started = Date.now();
-  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday);
+  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday, holidayName);
   let lastError = null;
 
   // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи

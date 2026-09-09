@@ -1,5 +1,5 @@
 import { answerCallback, editMarkup, editMessage, sendMessage, escapeHtml } from "./telegram.js";
-import { getVote, setVote, countVotes, votesByProvider } from "./db.js";
+import { getVote, setVote, countVotes, votesByProvider, getPost, countRecentSearchDislikes } from "./db.js";
 import {
   voteKeyboard,
   sourceKeyboard,
@@ -22,6 +22,37 @@ import { isAdmin } from "./config.js";
 import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
+
+function shortHash(text) {
+  let value = 2166136261;
+  const str = String(text || "");
+  for (let i = 0; i < str.length; i++) {
+    value ^= str.charCodeAt(i);
+    value = Math.imul(value, 16777619);
+  }
+  return (value >>> 0).toString(36);
+}
+
+async function maybeSuggestNewSearchQuery(chatId, postId, env) {
+  const post = await getPost(env, postId).catch(() => null);
+  if (!post || post.source !== "search" || !post.prompt) return;
+
+  const dislikes = await countRecentSearchDislikes(env, chatId, post.prompt, 7).catch(() => 0);
+  if (dislikes < 3) return;
+
+  const key = `search:suggest:${chatId}:${shortHash(post.prompt)}`;
+  if (await env.BOT_KV.get(key)) return;
+  await env.BOT_KV.put(key, "1", { expirationTtl: 3 * 24 * 60 * 60 });
+
+  await sendMessage(
+    chatId,
+    "👎 По поисковому запросу " +
+      `<code>${escapeHtml(post.prompt)}</code> уже несколько дизлайков за последние дни.\n\n` +
+      "Похоже, выдача не попадает в настроение чата. Лучше выбрать новый запрос: " +
+      `<code>/set_search кот работяга</code>`,
+    env
+  );
+}
 
 export async function handleCallback(query, env) {
   const data = query.data || "";
@@ -55,6 +86,7 @@ export async function handleCallback(query, env) {
 
     const toast = next === 0 ? "Голос отменён" : next === 1 ? "👍 Спасибо!" : "👎 Учтено";
     await answerCallback(query.id, toast, env);
+    if (next === -1) await maybeSuggestNewSearchQuery(chatId, postId, env);
     return;
   }
 

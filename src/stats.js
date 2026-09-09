@@ -38,6 +38,7 @@ async function overview(chatId, days, env) {
             SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok,
             SUM(CASE WHEN source='nim' THEN 1 ELSE 0 END) AS nim,
             SUM(CASE WHEN source='gdrive' THEN 1 ELSE 0 END) AS gdrive,
+            SUM(CASE WHEN source='search' THEN 1 ELSE 0 END) AS search,
             COUNT(DISTINCT chat_id) AS chats,
             ROUND(AVG(latency_ms)) AS avg_latency
      FROM posts WHERE local_date >= ?`
@@ -58,7 +59,7 @@ async function overview(chatId, days, env) {
       "",
       `Постов: <b>${row.total || 0}</b> (успешно ${row.ok || 0})`,
       `Чатов: <b>${row.chats || 0}</b>`,
-      `NIM: <b>${row.nim || 0}</b> · Google Drive: <b>${row.gdrive || 0}</b>`,
+      `NIM: <b>${row.nim || 0}</b> · Google Drive: <b>${row.gdrive || 0}</b> · Поиск: <b>${row.search || 0}</b>`,
       `Средняя задержка: <b>${row.avg_latency || 0} мс</b>`,
       "",
       `👍 <b>${votes?.likes || 0}</b>   👎 <b>${votes?.dislikes || 0}</b>`,

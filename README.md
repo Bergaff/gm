@@ -4,12 +4,13 @@ Telegram-бот, который каждое утро присылает «До�
 
 ## Возможности
 
-- Картинки из публичной папки **Google Drive** или генерация через **7 моделей NVIDIA NIM** с автоматическим fallback
-- Разное время и разные тексты для **будней и выходных**
+- Картинки из публичной папки **Google Drive**, генерация через современные провайдеры (Cloudflare Workers AI / Gemini / NVIDIA NIM) или поиск картинок через **Google/Yandex Images** с safe-фильтром
+- Разное время и разные тексты для **будней, выходных и основных праздников**
 - Отдельные настройки **для каждого чата**
 - Время можно задать **диапазоном** (`09:00-09:40`) — бот выберет случайную минуту
 - Кнопки **👍 / 👎** под каждым постом
 - **Статистика** по моделям, чатам и лайкам — доступна только Telegram ID из `ADMIN_IDS`
+- Антиповторы для Drive и поиска; если один поисковый запрос несколько раз дизлайкают, бот предлагает сменить запрос через `/set_search`
 
 ## Стек
 
@@ -28,4 +29,9 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `BOT_TOKEN`
 - `GOOGLE_API_KEY`
 - `NVIDIA_API_KEY`
+- `GEMINI_API_KEY` — опционально, Gemini 2.5 Flash Image
+- `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов
+- `GOOGLE_SEARCH_CX` — опционально для источника `search` (Google Programmable Search Engine)
+- `GOOGLE_SEARCH_API_KEY` — опционально; если не задан, используется `GOOGLE_API_KEY`
+- `IMAGE_SEARCH_PROVIDER` — `google`, `yandex` или `auto` (по умолчанию `google`)
 - `WEBHOOK_SECRET`

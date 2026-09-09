@@ -3,12 +3,14 @@ import {
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
   DAY_MESSAGES,
+  HOLIDAY_MESSAGES,
 } from "./config.js";
 import { sendMessage, sendPhotoBytes, sendMediaBytes, escapeHtml, tg, editMessage } from "./telegram.js";
 import { getSettings, patchSettings, registerChat, listChats } from "./storage.js";
 import { setPending, getPending, clearPending } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
 import { parseFolderId, getGdriveImage, listImages } from "./images/gdrive.js";
+import { getSearchImage } from "./images/search.js";
 import {
   generateImage,
   NIM_PROVIDERS,
@@ -66,6 +68,24 @@ export function pickPrompt(settings, isWeekend) {
   return settings.nimPrompt;
 }
 
+function enforcePrompt(prompt) {
+  const base = String(prompt || "").trim();
+  if (!base) return base;
+
+  // Некоторые image-модели на коротких запросах уходят в «рандом».
+  // Жёстко фиксируем главный объект/действие, но не меняем смысл запроса.
+  return (
+    `Create exactly this scene: ${base}. ` +
+    "The main subject, action and mood must match the user's prompt; " +
+    "do not substitute unrelated random objects."
+  );
+}
+
+function addSafetyNegative(negative) {
+  const extra = "nsfw, nude, naked, erotic, porn, hentai, gore, watermark, logo, text";
+  return [negative, extra].filter(Boolean).join(", ");
+}
+
 export function voteKeyboard(postId, likes = 0, dislikes = 0) {
   return {
     inline_keyboard: [
@@ -81,6 +101,9 @@ export function voteKeyboard(postId, likes = 0, dislikes = 0) {
 // У понедельника, пятницы и воскресенья своё настроение — раньше
 // в любой день шла одна и та же обезличенная фраза.
 function pickTemplate(now) {
+  const holiday = now.holidayName ? HOLIDAY_MESSAGES[now.holidayName] : null;
+  if (holiday && holiday.length) return pick(holiday);
+
   const special = DAY_MESSAGES[now.weekday];
 
   // В «особые» дни половину раз берём тематическую фразу
@@ -117,6 +140,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       // Точный день недели: без него модель писала «опять понедельник»
       // во вторник и про конец недели в среду.
       weekday: now.weekday,
+      holidayName: now.holidayName || "",
     });
     if (generated.ok) {
       text = generated.text;
@@ -139,6 +163,8 @@ export async function sendMorning(chatId, settings, env, options = {}) {
 
   const postId = newPostId();
   const folderId = parseFolderId(settings.gdriveFolder);
+  const useSearch = settings.source === "search";
+  const searchQuery = String(settings.searchQuery || "").trim();
 
   let useNim = settings.source === "nim";
   if (settings.source === "mixed") {
@@ -157,10 +183,18 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   let activePrompt = rawPrompt;
   let promptTranslated = false;
 
+  let promptError = null;
+
   if (useNim && needsTranslation(rawPrompt)) {
     const tr = await translatePrompt(rawPrompt, env);
     activePrompt = tr.text;
     promptTranslated = tr.translated;
+
+    // Если русский промпт не перевёлся, не отдаём его image-модели как есть:
+    // именно так появлялись «случайные картинки», не связанные с запросом.
+    if (!tr.translated) {
+      promptError = tr.error || "русский промпт не удалось перевести на английский";
+    }
   }
 
   // Дописываем стиль: «кот на полу» -> «cat on the floor, professional
@@ -173,21 +207,32 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     // resolveStyle не даст «Фотореализм» поверх промпта «аниме тян»:
     // такой набор приказов модель отрабатывает мылом.
     styleUsed = resolveStyle(activePrompt, settings.imageStyle);
-    negative = negativeFor(settings.imageStyle, activePrompt);
+    negative = addSafetyNegative(negativeFor(settings.imageStyle, activePrompt));
     const withStyle = applyStyle(activePrompt, settings.imageStyle);
     styleApplied = withStyle !== activePrompt;
-    activePrompt = withStyle;
+    activePrompt = enforcePrompt(withStyle);
   }
 
   if (useNim) {
-    const result = await generateImage(activePrompt, env, {
-      preferred: settings.nimModel,
-      chatId,
-      negative,
-    });
-    attempts = result.attempts || [];
-    if (result.ok) image = result;
-    else error = "Все модели NIM недоступны";
+    if (promptError) {
+      error = "Промпт не отправлен в генератор: " + promptError;
+      attempts = [{ provider: "prompt", ok: false, status: 0, latency: 0, error }];
+    } else {
+      const result = await generateImage(activePrompt, env, {
+        preferred: settings.nimModel,
+        chatId,
+        negative,
+      });
+      attempts = result.attempts || [];
+      if (result.ok) image = result;
+      else error = "Все модели генерации недоступны";
+    }
+  } else if (useSearch) {
+    try {
+      image = await getSearchImage(chatId, searchQuery || rawPrompt, env, settings.avoidRepeatLast);
+    } catch (e) {
+      error = String(e);
+    }
   } else if (folderId) {
     try {
       image = await getGdriveImage(chatId, folderId, env, settings.avoidRepeatLast);
@@ -206,14 +251,43 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       } catch (e) {
         error = `${error}; fallback Drive: ${e}`;
       }
-    } else if (!useNim) {
-      const result = await generateImage(activePrompt, env, {
-        preferred: settings.nimModel,
-        chatId,
-        negative,
-      });
-      attempts = attempts.concat(result.attempts || []);
-      if (result.ok) image = result;
+    } else if (useNim && searchQuery) {
+      try {
+        image = await getSearchImage(chatId, searchQuery, env, settings.avoidRepeatLast);
+      } catch (e) {
+        error = `${error}; fallback Search: ${e}`;
+      }
+    } else if (!useNim && !useSearch) {
+      // Fallback из Drive в генерацию: готовим промпт так же строго, как
+      // для основного NIM-источника, включая перевод. Не отправляем кириллицу
+      // напрямую, чтобы не получать случайные картинки.
+      let fallbackPrompt = rawPrompt;
+      let fallbackNegative = "";
+      let fallbackPromptError = null;
+
+      if (needsTranslation(rawPrompt)) {
+        const tr = await translatePrompt(rawPrompt, env);
+        fallbackPrompt = tr.text;
+        if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
+      }
+
+      if (!fallbackPromptError) {
+        fallbackNegative = addSafetyNegative(negativeFor(settings.imageStyle, fallbackPrompt));
+        fallbackPrompt = enforcePrompt(applyStyle(fallbackPrompt, settings.imageStyle));
+        const result = await generateImage(fallbackPrompt, env, {
+          preferred: settings.nimModel,
+          chatId,
+          negative: fallbackNegative,
+        });
+        attempts = attempts.concat(result.attempts || []);
+        if (result.ok) {
+          image = result;
+          activePrompt = fallbackPrompt;
+          negative = fallbackNegative;
+        }
+      } else {
+        attempts.push({ provider: "prompt", ok: false, status: 0, latency: 0, error: fallbackPromptError });
+      }
     }
   }
 
@@ -255,7 +329,9 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     // Раньше причина была видна только в /test. В обычной рассылке
     // приходило глухое «не удалось», и было непонятно, что чинить.
     let hint = "";
-    if (!settings.gdriveFolder && settings.source !== "nim") {
+    if (settings.source === "search" && !settings.searchQuery) {
+      hint = "\n<i>Поисковый запрос не задан: /set_search кот работяга</i>";
+    } else if (!settings.gdriveFolder && settings.source === "gdrive") {
       hint = "\n<i>Источник не настроен: /set_source nim или /set_gdrive</i>";
     } else if (attempts.some((a) => a.status === 429 ||
                /limit|quota|exceed/i.test(String(a.error || "")))) {
@@ -282,10 +358,14 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     messageId,
     localDate: now.date,
     isWeekend: now.isWeekend,
-    source: image?.provider === "gdrive" ? "gdrive" : useNim ? "nim" : "gdrive",
+    source: image?.provider === "gdrive"
+      ? "gdrive"
+      : String(image?.provider || "").startsWith("search:")
+        ? "search"
+        : useNim ? "nim" : useSearch ? "search" : "gdrive",
     provider: image?.provider || null,
     model: image?.model || null,
-    prompt: useNim ? activePrompt : null,
+    prompt: useNim ? activePrompt : useSearch ? (image?.query || searchQuery || rawPrompt) : null,
     assetRef: image?.assetRef || null,
     assetName: image?.assetName || null,
     tgFileId,
@@ -299,7 +379,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     status,
     provider: image?.provider,
     error,
-    prompt: useNim ? activePrompt : null,
+    prompt: useNim ? activePrompt : useSearch ? (image?.query || searchQuery || rawPrompt) : null,
     promptOriginal: useNim && promptTranslated ? rawPrompt : null,
     promptTranslated,
     captionSource,
@@ -438,7 +518,7 @@ export function changeModelsText(env, title, current) {
 
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
-  "/set_source", "/set_gdrive", "/refresh_gdrive",
+  "/set_source", "/set_gdrive", "/refresh_gdrive", "/set_search",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
   "/models", "/set_model", "/set_timezone", "/style",
   "/set_weekday_time", "/set_weekend_time",
@@ -454,6 +534,7 @@ const KNOWN_COMMANDS = new Set([
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
 const PENDING_PROMPTS = {
   set_gdrive: "Пришлите ссылку на публичную папку Google Drive следующим сообщением.\n\n<i>/cancel — отмена</i>",
+  set_search: "Пришлите поисковый запрос для картинок.\n\n<i>Пример: кот работяга</i>\n<i>/cancel — отмена</i>",
   add_prompt_weekday: "Пришлите текст промпта для <b>будней</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>.\n\n<i>/cancel — отмена</i>",
@@ -467,7 +548,10 @@ export function sourceKeyboard(current) {
       [
         { text: `${mark("gdrive")}Google Drive`, callback_data: "s|source|gdrive" },
         { text: `${mark("nim")}Генерация`, callback_data: "s|source|nim" },
-        { text: `${mark("mixed")}Обе`, callback_data: "s|source|mixed" },
+      ],
+      [
+        { text: `${mark("search")}Поиск`, callback_data: "s|source|search" },
+        { text: `${mark("mixed")}Drive + генерация`, callback_data: "s|source|mixed" },
       ],
       [{ text: "◀️ Назад в меню", callback_data: "nav|menu" }],
     ],
@@ -896,8 +980,8 @@ export async function handleCommand(message, env, options = {}) {
         });
         return;
       }
-      if (!["gdrive", "nim", "mixed"].includes(value)) {
-        await sendMessage(chatId, "Использование: <code>/set_source gdrive|nim|mixed</code>", env);
+      if (!["gdrive", "nim", "search", "mixed"].includes(value)) {
+        await sendMessage(chatId, "Использование: <code>/set_source gdrive|nim|search|mixed</code>", env);
         return;
       }
       await patchSettings(chatId, { source: value }, env);
@@ -935,6 +1019,16 @@ export async function handleCommand(message, env, options = {}) {
       } catch (e) {
         await sendMessage(chatId, `❌ <code>${escapeHtml(String(e).slice(0, 300))}</code>`, env);
       }
+      return;
+    }
+
+    case "/set_search": {
+      if (!value) {
+        await setPending(chatId, userId, "set_search", env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_search, env);
+        return;
+      }
+      await applySearchQuery(value, chatId, env);
       return;
     }
 
@@ -1235,6 +1329,7 @@ export async function handleCommand(message, env, options = {}) {
 
       const willUseNim =
         s.source === "nim" || (s.source === "mixed" && true);
+      const willUseSearch = s.source === "search";
       // Выбираем промпт ОДИН раз и передаём в sendMorning,
       // иначе показ и генерация разойдутся.
       const preview = pickPrompt(s, localParts(s.timezone).isWeekend);
@@ -1251,7 +1346,9 @@ export async function handleCommand(message, env, options = {}) {
           willUseNim
             ? `Промпт: <i>${escapeHtml(String(preview))}</i>` +
               (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
-            : "Картинка: случайная из Google Drive",
+            : willUseSearch
+              ? `Поиск: <i>${escapeHtml(s.searchQuery || preview)}</i>`
+              : "Картинка: случайная из Google Drive",
           `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
           !s.aiCaptions && s.character
             ? "⚠️ <b>Характер задан, но подписи выключены!</b> Включить: /ai_on"
@@ -1326,6 +1423,9 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "set_gdrive":
       return applyGdrive(text, chatId, env);
 
+    case "set_search":
+      return applySearchQuery(text, chatId, env);
+
     case "add_prompt_weekday":
       return addPrompt("weekday", text, chatId, env);
 
@@ -1372,6 +1472,11 @@ async function runDiagnostics(chatId, env) {
   lines.push("<b>Ключи</b>");
   lines.push(`${env.BOT_TOKEN ? "✅" : "❌"} BOT_TOKEN`);
   lines.push(`${env.GOOGLE_API_KEY ? "✅" : "❌"} GOOGLE_API_KEY`);
+  lines.push(`${(env.GOOGLE_SEARCH_API_KEY || env.GOOGLE_API_KEY) && (env.GOOGLE_SEARCH_CX || env.GOOGLE_SEARCH_ENGINE_ID || env.GOOGLE_CSE_ID) ? "✅" : "❌"} Google Image Search: GOOGLE_SEARCH_CX + ключ`);
+  lines.push(`Поиск картинок: <code>${escapeHtml(String(env.IMAGE_SEARCH_PROVIDER || "google"))}</code>`);
+
+  lines.push(`${env.GEMINI_API_KEY ? "✅" : "➖"} GEMINI_API_KEY (Gemini картинки)`);
+  lines.push(`${env.AI ? "✅" : "➖"} Cloudflare Workers AI binding`);
 
   const imgKeys = getApiKeys(env);
   lines.push(`${imgKeys.length ? "✅" : "❌"} NVIDIA картинки: ключей ${imgKeys.length}`);
@@ -1440,6 +1545,25 @@ async function runDiagnostics(chatId, env) {
   lines.push(`источник: <b>${s.source}</b>`);
 
   await sendMessage(chatId, lines.join("\n"), env);
+}
+
+async function applySearchQuery(value, chatId, env) {
+  const query = String(value || "").trim().replace(/\s+/g, " ").slice(0, 120);
+  if (query.length < 2) {
+    await sendMessage(chatId, "❌ Запрос слишком короткий. Пример: <code>/set_search кот работяга</code>", env);
+    return;
+  }
+
+  await patchSettings(chatId, { searchQuery: query, source: "search" }, env);
+  await sendMessage(
+    chatId,
+    "✅ Поиск картинок включён.\n" +
+      `Запрос: <code>${escapeHtml(query)}</code>\n\n` +
+      "Буду брать каждый раз новую картинку без повторов из выдачи. " +
+      "18+ фильтр включён на стороне поиска и дополнительно проверяется по результатам.\n\n" +
+      "Проверить: /test",
+    env
+  );
 }
 
 async function applyGdrive(value, chatId, env) {
@@ -1610,6 +1734,7 @@ function helpText(role) {
     "/set_source — источник картинок (кнопки)",
     "/set_gdrive — папка Google Drive",
     "/refresh_gdrive — обновить список файлов",
+    "/set_search &lt;запрос&gt; — брать картинки из Google/Yandex Images",
     "",
     "<b>Промпты</b>",
     "/prompts — список для будней (кнопки)",
@@ -1682,6 +1807,7 @@ function settingsText(s, chatId, role) {
     `Рассылка: <b>${s.enabled ? "включена" : "выключена"}</b>`,
     `Источник: <b>${s.source}</b>`,
     `Google Drive: ${s.gdriveFolder ? "подключён ✅" : "не задан ❌"}`,
+    `Поиск: <code>${escapeHtml(s.searchQuery || "не задан")}</code>`,
     `Модель NIM: <b>${s.nimModel}</b>`,
     `Стиль: <b>${getStyle(s.imageStyle).title}</b>`,
     "",

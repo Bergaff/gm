@@ -101,6 +101,20 @@ export function getPost(env, postId) {
 
 // Лайки/дизлайки по каждому провайдеру — для /models.
 // Голоса агрегируются ДО join, иначе счётчики множатся на число голосов.
+export async function countRecentSearchDislikes(env, chatId, query, days = 7) {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT p.id) AS cnt
+     FROM posts p
+     JOIN votes v ON v.post_id = p.id AND v.vote = -1
+     WHERE p.chat_id = ?
+       AND p.source = 'search'
+       AND p.prompt = ?
+       AND p.created_at >= datetime('now', ?)`
+  ).bind(String(chatId), String(query), `-${Number(days) || 7} days`).first();
+
+  return Number(row?.cnt || 0);
+}
+
 export async function votesByProvider(env, chatId = null) {
   const where = chatId ? "WHERE p.chat_id = ?" : "";
   const stmt = env.DB.prepare(
