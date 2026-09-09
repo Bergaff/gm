@@ -179,7 +179,7 @@ const DAY_HINTS = {
 // Не всегда: иначе каждый понедельник будет об одном и том же.
 const DAY_MENTION_CHANCE = 0.5;
 
-function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "") {
+function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "", birthdays = []) {
   const base = holiday
     ? `праздник «${holiday}» — выходной, никакой работы, можно отдыхать`
     : isWeekend
@@ -192,6 +192,8 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
   // Точный день сообщаем ВСЕГДА — чтобы модель не выдумала чужой.
   // А вот обыгрывать его просим только иногда.
   const dayType = hint ? `${hint}. По типу это ${base}` : base;
+
+  const birthdayNames = (birthdays || []).map((b) => b.at || b.name).filter(Boolean).join(", ");
 
   // ВАЖНО: характер чата идёт в system-сообщение и стоит ПЕРВЫМ.
   // Раньше он был в user, а system диктовал нейтральный тон — модель
@@ -235,6 +237,9 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
           ? `ПРАЗДНИК: сегодня ${holiday}. Это выходной, не называй его рабочим днём и не пиши про дедлайны/офис как обязательные дела.\n\n`
           : "") +
         dayRule(weekday, mentionDay && !holiday) +
+        (birthdayNames
+          ? `ДЕНЬ РОЖДЕНИЯ: сегодня день рождения у ${birthdayNames}. Обязательно поздравь их тепло, но коротко.\n\n`
+          : "") +
         exampleBlock(examples) +
         "Верни ТОЛЬКО текст приветствия.",
     },
@@ -347,12 +352,13 @@ export async function generateCaption(env, options = {}) {
     examples = [],
     weekday = "",
     holidayName = "",
+    birthdays = [],
   } = options;
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
   const started = Date.now();
-  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday, holidayName);
+  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday, holidayName, birthdays);
   let lastError = null;
 
   // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи

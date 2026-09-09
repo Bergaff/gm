@@ -60,6 +60,91 @@ function pick(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+function mmdd(localDate) {
+  return String(localDate || "").slice(5, 10);
+}
+
+function birthdayPeople(settings, localDate) {
+  const today = mmdd(localDate);
+  const birthdays = settings.birthdays || {};
+  return Object.entries(birthdays)
+    .filter(([, b]) => b?.date === today)
+    .map(([id, b]) => ({
+      id,
+      name: b.name || b.username || id,
+      username: b.username || "",
+      at: b.username ? "@" + b.username : b.name || id,
+    }));
+}
+
+function birthdayLine(people) {
+  if (!people.length) return "";
+  const names = people.map((p) => p.at).join(", ");
+  return people.length === 1
+    ? `🎂 Сегодня день рождения у ${names}! Поздравляем!`
+    : `🎂 Сегодня дни рождения у ${names}! Поздравляем!`;
+}
+
+function parseBirthdayDate(value) {
+  const raw = String(value || "").trim();
+  const iso = raw.match(/^\d{4}-(\d{1,2})-(\d{1,2})$/);
+  const m = iso || raw.match(/^(\d{1,2})[.\/\-](\d{1,2})(?:[.\/\-]\d{2,4})?$/);
+  if (!m) return null;
+
+  // Основной формат для чата — русский DD.MM. Полный ISO YYYY-MM-DD тоже
+  // принимаем. Двухчастное "03-08" трактуется как 3 августа, а не MM-DD.
+  const day = Number(iso ? m[2] : m[1]);
+  const month = Number(iso ? m[1] : m[2]);
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const dim = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (day > dim) return null;
+  return `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function formatBirthdayDate(mmddValue) {
+  const [m, d] = String(mmddValue || "").split("-");
+  return d && m ? `${d}.${m}` : String(mmddValue || "");
+}
+
+function promptListsText(settings) {
+  const section = (title, list) => {
+    const items = Array.isArray(list) && list.length
+      ? list.map((p, i) => `${i + 1}. ${p}`).join("\n")
+      : "— пусто, используется общий промпт";
+    return `${title}\n${items}`;
+  };
+
+  return [
+    section("Будни:", settings.weekdayPrompts || []),
+    "",
+    section("Выходные:", settings.weekendPrompts || []),
+    "",
+    `Общий запасной:\n${settings.nimPrompt}`,
+  ].join("\n");
+}
+
+function selectPromptForTest(settings, value, now) {
+  const parts = String(value || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { prompt: pickPrompt(settings, now.isWeekend), label: "случайный" };
+
+  const kind = ["weekday", "будни", "workday"].includes(parts[0])
+    ? "weekday"
+    : ["weekend", "выходные"].includes(parts[0])
+      ? "weekend"
+      : null;
+
+  const index = Number(kind ? parts[1] : parts[0]);
+  if (!Number.isInteger(index) || index < 1) return { error: "Формат: /test weekday 2 или /test weekend 1" };
+
+  const list = kind === "weekend" ? settings.weekendPrompts : kind === "weekday" ? settings.weekdayPrompts : (now.isWeekend ? settings.weekendPrompts : settings.weekdayPrompts);
+  if (!Array.isArray(list) || !list[index - 1]) {
+    return { error: `Промпта №${index} нет.\n\n${promptListsText(settings)}` };
+  }
+
+  return { prompt: list[index - 1], label: `${kind || (now.isWeekend ? "weekend" : "weekday")} #${index}` };
+}
+
 // Промпт берётся из библиотеки для нужного типа дня.
 // Если список пуст — используется одиночный nimPrompt (обратная совместимость).
 export function pickPrompt(settings, isWeekend) {
@@ -121,9 +206,13 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   const { test = false, forcePrompt = null } = options;
 
   const now = localParts(settings.timezone);
+  const birthdaysToday = birthdayPeople(settings, now.date);
 
   // Подпись: либо генерирует нейросеть под характер чата, либо готовая фраза.
   let text = pickTemplate(now);
+  if (birthdaysToday.length && !settings.aiCaptions) {
+    text = `${text}\n\n${birthdayLine(birthdaysToday)}`;
+  }
   let captionSource = "template";
   let captionError = null;
 
@@ -141,6 +230,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       // во вторник и про конец недели в среду.
       weekday: now.weekday,
       holidayName: now.holidayName || "",
+      birthdays: birthdaysToday,
     });
     if (generated.ok) {
       text = generated.text;
@@ -521,6 +611,7 @@ const KNOWN_COMMANDS = new Set([
   "/set_source", "/set_gdrive", "/refresh_gdrive", "/set_search",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
   "/models", "/set_model", "/set_timezone", "/style",
+  "/birthday", "/birthdays", "/birthday_remove",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
   "/test", "/reset", "/cancel", "/diag", "/menu",
@@ -826,6 +917,14 @@ export async function handleCommand(message, env, options = {}) {
 
   const role = await getRole(chatId, userId, env, { isChannelPost });
 
+  // ── Дни рождения ────────────────────────────────────────────────────
+  // Свой день рождения может назначить сам участник. За другого — только
+  // админ чата или владелец бота, ответом на сообщение этого участника.
+  if (command === "/birthday" || command === "/birthday_remove" || command === "/birthdays") {
+    await handleBirthdayCommand(command, value, message, chatId, userId, role, env);
+    return;
+  }
+
   // ── Статистика: только владельцы бота ────────────────────────────────
   if (
     command.startsWith("/stats") ||
@@ -1035,6 +1134,10 @@ export async function handleCommand(message, env, options = {}) {
     // ── Промпты ────────────────────────────────────────────────────────
     case "/prompts": {
       const s = await getSettings(chatId, env);
+      if (["all", "все", "both"].includes(value.toLowerCase())) {
+        await sendMessage(chatId, `<pre>${escapeHtml(promptListsText(s))}</pre>`, env);
+        return;
+      }
       const kind = value === "weekend" ? "weekend" : "weekday";
       const list = kind === "weekend" ? s.weekendPrompts : s.weekdayPrompts;
       await sendMessage(chatId, promptsText(s, kind), env, {
@@ -1331,8 +1434,19 @@ export async function handleCommand(message, env, options = {}) {
         s.source === "nim" || (s.source === "mixed" && true);
       const willUseSearch = s.source === "search";
       // Выбираем промпт ОДИН раз и передаём в sendMorning,
-      // иначе показ и генерация разойдутся.
-      const preview = pickPrompt(s, localParts(s.timezone).isWeekend);
+      // иначе показ и генерация разойдутся. Можно выбрать конкретный:
+      // /test weekday 2 или /test weekend 1.
+      if (["list", "all", "все"].includes(value.toLowerCase())) {
+        await sendMessage(chatId, `<pre>${escapeHtml(promptListsText(s))}</pre>`, env);
+        return;
+      }
+      const nowForTest = localParts(s.timezone);
+      const selected = selectPromptForTest(s, value, nowForTest);
+      if (selected.error) {
+        await sendMessage(chatId, `❌ ${escapeHtml(selected.error)}`, env);
+        return;
+      }
+      const preview = selected.prompt;
 
       // Одно служебное сообщение на весь тест: сначала «Готовлю…»,
       // потом ЭТО ЖЕ сообщение редактируется в итоговый отчёт.
@@ -1343,6 +1457,7 @@ export async function handleCommand(message, env, options = {}) {
           "⏳ Готовлю…",
           "",
           `Источник: <b>${s.source}</b>`,
+          `Промпт теста: <b>${escapeHtml(selected.label)}</b>`,
           willUseNim
             ? `Промпт: <i>${escapeHtml(String(preview))}</i>` +
               (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
@@ -1463,6 +1578,73 @@ async function applyPendingValue(pending, text, chatId, env) {
   }
 }
 
+async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
+  if (command === "/birthdays") {
+    const s = await getSettings(chatId, env);
+    const list = Object.entries(s.birthdays || {}).sort((a, b) => String(a[1].date).localeCompare(String(b[1].date)));
+    if (!list.length) {
+      await sendMessage(chatId, "🎂 Дни рождения пока не заданы.\n\nСвой: <code>/birthday 08.03</code>\nЗа другого: reply + <code>/birthday 08.03</code> (админ/владелец)", env);
+      return;
+    }
+
+    const lines = list.map(([id, b]) =>
+      `• <b>${formatBirthdayDate(b.date)}</b> — ${escapeHtml(b.username ? "@" + b.username : b.name || id)} <code>${id}</code>`
+    );
+    await sendMessage(chatId, `🎂 <b>Дни рождения этого чата</b>\n\n${lines.join("\n")}`, env);
+    return;
+  }
+
+  if (!userId) return;
+
+  const target = message.reply_to_message?.from || message.from;
+  const isSelf = String(target?.id) === String(userId);
+  if (!isSelf && !canGrant(role)) {
+    await sendMessage(chatId, "⛔ За другого участника день рождения может назначить только админ чата или владелец бота. Ответьте командой на сообщение участника.", env);
+    return;
+  }
+  if (target?.is_bot) {
+    await sendMessage(chatId, "Ботам день рождения не назначаем.", env);
+    return;
+  }
+
+  const s = await getSettings(chatId, env);
+  const birthdays = { ...(s.birthdays || {}) };
+
+  if (command === "/birthday_remove") {
+    delete birthdays[String(target.id)];
+    await patchSettings(chatId, { birthdays }, env);
+    await sendMessage(chatId, `🗑 День рождения для ${escapeHtml(target.username ? "@" + target.username : target.first_name || String(target.id))} удалён.`, env);
+    return;
+  }
+
+  const date = parseBirthdayDate(value);
+  if (!date) {
+    await sendMessage(
+      chatId,
+      "Формат: <code>/birthday ДД.ММ</code>\n\n" +
+        "Свой день рождения ставится обычной командой. За другого участника — ответьте на его сообщение: <code>/birthday 08.03</code>.\n" +
+        "Удалить: <code>/birthday_remove</code> или reply + <code>/birthday_remove</code>.",
+      env
+    );
+    return;
+  }
+
+  birthdays[String(target.id)] = {
+    date,
+    name: target.first_name || target.username || String(target.id),
+    username: target.username || "",
+    setBy: String(userId),
+    updatedAt: new Date().toISOString(),
+  };
+  await patchSettings(chatId, { birthdays }, env);
+
+  await sendMessage(
+    chatId,
+    `✅ День рождения для ${escapeHtml(target.username ? "@" + target.username : target.first_name || String(target.id))}: <b>${formatBirthdayDate(date)}</b>.`,
+    env
+  );
+}
+
 // Проверяет всё, что нужно для работы, и показывает что именно сломано.
 async function runDiagnostics(chatId, env) {
   const s = await getSettings(chatId, env);
@@ -1542,6 +1724,7 @@ async function runDiagnostics(chatId, env) {
 
   lines.push("<b>Расписание</b>");
   lines.push(`${s.enabled ? "✅ включено" : "⛔ выключено"} · ${s.weekdayTime} / ${s.weekendTime} · ${s.timezone}`);
+  lines.push(`дней рождения: <b>${Object.keys(s.birthdays || {}).length}</b>`);
   lines.push(`источник: <b>${s.source}</b>`);
 
   await sendMessage(chatId, lines.join("\n"), env);
@@ -1755,10 +1938,18 @@ function helpText(role) {
     "/set_weekday_time 09:00 или 09:00-09:40",
     "/set_weekend_time 10:30",
     "",
+    "<b>Дни рождения</b>",
+    "/birthday 08.03 — указать свой день рождения",
+    "/birthday 08.03 — reply на участника, если вы админ/владелец",
+    "/birthdays — список",
+    "/birthday_remove — удалить свой или reply-цель",
+    "",
     "<b>Прочее</b>",
     "/voting_on, /voting_off",
     "/enable, /disable",
     "/test — отправить прямо сейчас",
+    "/test weekday 2 или /test weekend 1 — проверить конкретный промпт",
+    "/test list — показать будние и выходные промпты сразу",
     "/reset — сброс настроек чата",
     "/id — узнать ID чата и свой",
     "/diag — проверить, что настроено и что сломано",
@@ -1819,6 +2010,7 @@ function settingsText(s, chatId, role) {
     `Будни: <b>${s.weekdayTime}</b>`,
     `Выходные: <b>${s.weekendTime}</b>`,
     `Голосование: <b>${s.votingEnabled ? "да" : "нет"}</b>`,
+    `Дни рождения: <b>${Object.keys(s.birthdays || {}).length}</b>`,
     "",
     `Ваша роль: <b>${roleLabel(role)}</b>`,
     "",
