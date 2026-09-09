@@ -18,35 +18,22 @@ const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const DEFAULT_LLM_MODEL = "meta/llama-3.3-70b-instruct";
 const DEFAULT_GEMINI_TEXT_MODEL = "gemini-2.5-flash";
 
-export const CAPTION_STYLES = {
-  balanced: {
-    title: "⚖️ Ровно",
-    instruction: "Тон: естественно, без официоза, умеренный юмор. 2–3 предложения.",
-  },
-  chatty: {
-    title: "💬 Как в чате",
-    instruction: "Тон: максимально похоже на живое сообщение участника этого чата. 2–4 предложения, можно конкретные шутки из описания чата.",
-  },
-  ironic: {
-    title: "😏 Иронично",
-    instruction: "Тон: лёгкая ирония, сарказм без злобы, рабочие приколы. 2–4 предложения.",
-  },
-  warm: {
-    title: "🫶 Тепло",
-    instruction: "Тон: тёплый, дружеский, поддерживающий, но без ванильных штампов. 2–4 предложения.",
-  },
-  absurd: {
-    title: "🌀 Абсурдно",
-    instruction: "Тон: чуть абсурдный чатовый юмор, но смысл должен быть понятен. 2–4 предложения.",
-  },
-};
-
-export function captionStyleTitle(id) {
-  return CAPTION_STYLES[id]?.title || CAPTION_STYLES.chatty.title;
+function normalizeTraits(traits) {
+  if (!Array.isArray(traits)) return [];
+  return traits.map((t) => String(t || "").trim()).filter(Boolean).slice(0, 12);
 }
 
-function captionStyleInstruction(id) {
-  return CAPTION_STYLES[id]?.instruction || CAPTION_STYLES.chatty.instruction;
+function captionTraitsBlock(traits) {
+  const list = normalizeTraits(traits);
+  if (!list.length) return "";
+  return (
+    "=== КОРОТКИЕ ХАРАКТЕРИСТИКИ ЧАТА ===\n" +
+    list.map((t) => "— " + t).join("\n") +
+    "\n=== КОНЕЦ ХАРАКТЕРИСТИК ===\n\n" +
+    "Используй эти характеристики как общий стиль чата. Это не тема поста, " +
+    "а настроение и манера: кто эти люди, как они общаются, насколько они " +
+    "ироничные, добрые, технические, мемные и т.п.\n\n"
+  );
 }
 
 /**
@@ -258,7 +245,7 @@ function recentCaptionsBlock(recentCaptions) {
   );
 }
 
-function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "", birthdays = [], captionStyle = "chatty", recentCaptions = []) {
+function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "", birthdays = [], captionTraits = [], recentCaptions = []) {
   const base = holiday
     ? `праздник «${holiday}» — выходной, никакой работы, можно отдыхать`
     : isWeekend
@@ -281,14 +268,19 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
     {
       role: "system",
       content:
-        "Ты — участник этого Telegram-чата и пишешь утреннее приветствие " +
-        "ИМЕННО В ЕГО СТИЛЕ.\n\n" +
-        "=== ХАРАКТЕР ЧАТА (главное правило) ===\n" +
-        character +
-        "\n=== КОНЕЦ ОПИСАНИЯ ===\n\n" +
-        "Пиши так, будто ты свой в этом чате: та же лексика, тот же юмор, " +
-        "та же степень иронии и неформальности. Если чат ироничный — " +
-        "шути. Если грубоватый — не сглаживай. Если сленговый — используй сленг.\n\n" +
+        "Задача — написать общее утреннее сообщение для Telegram-чата " +
+        "в его манере, без обращения от конкретного человека.\n\n" +
+        (String(character || "").trim()
+          ? "=== РАЗВЁРНУТОЕ ОПИСАНИЕ ЧАТА ===\n" +
+            character +
+            "\n=== КОНЕЦ ОПИСАНИЯ ===\n\n"
+          : "Характер чата развёрнуто не задан. Если есть примеры ниже — " +
+            "считай их главным источником стиля и перефразируй их манеру, " +
+            "не копируя дословно.\n\n") +
+        captionTraitsBlock(captionTraits) +
+        "Пиши как сообщение, которое подходит всей беседе: учитывай лексику, " +
+        "юмор, степень иронии, теплоту и профессиональный фон из характеристик, " +
+        "описания и примеров.\n\n" + 
         "Формат:\n" +
         "1. Поздоровайся своими словами. Можно «Доброе утро», можно " +
         "иначе — лишь бы звучало живо и по-разному каждый раз. " +
@@ -298,8 +290,7 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
         "чата: работа, привычки, мемы, локальные шутки, типичные боли.\n" +
         "3. Обычно 180–550 символов. Если мысль сильная — можно короче, " +
         "но не превращай всё в одинаковое «доброе утро, хорошего дня».\n" +
-        "4. Без хэштегов, markdown и кавычек вокруг ответа.\n" +
-        "5. " + captionStyleInstruction(captionStyle) + "\n\n" +
+        "4. Без хэштегов, markdown и кавычек вокруг ответа.\n\n" +
         "ЗАПРЕЩЕНО писать безликие штампы вроде «Пусть день будет " +
         "продуктивным», «Начинаем день на позитиве», «Отличного дня». " +
         "Такие фразы — провал задачи.\n\n" +
@@ -427,14 +418,14 @@ export function captionProblem(text) {
  */
 export async function generateCaption(env, options = {}) {
   const {
-    character = DEFAULT_CHARACTER,
+    character = "",
     isWeekend = false,
     chatTitle = "",
     examples = [],
     weekday = "",
     holidayName = "",
     birthdays = [],
-    captionStyle = "chatty",
+    captionTraits = [],
     recentCaptions = [],
   } = options;
 
@@ -449,7 +440,7 @@ export async function generateCaption(env, options = {}) {
     weekday,
     holidayName,
     birthdays,
-    captionStyle,
+    captionTraits,
     recentCaptions
   );
   let lastError = null;

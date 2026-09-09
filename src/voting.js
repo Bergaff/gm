@@ -176,8 +176,7 @@ export async function handleCallback(query, env) {
       await editMessage(chatId, mid, stylesText(s.imageStyle, (t) => String(t)), env,
         stylesKeyboard(s.imageStyle));
     } else if (screen === "caption_style") {
-      await editMessage(chatId, mid, captionStylesText(s.captionStyle || "chatty"), env,
-        captionStylesKeyboard(s.captionStyle || "chatty"));
+      await editMessage(chatId, mid, captionStylesText(s), env, captionStylesKeyboard());
     } else if (screen === "models") {
       let stats = {};
       try { stats = await votesByProvider(env, chatId); } catch { stats = {}; }
@@ -220,15 +219,23 @@ export async function handleCallback(query, env) {
         return;
       }
 
-      if (field === "caption_style") {
-        await patchSettings(chatId, { captionStyle: value, aiCaptions: true }, env);
-        await editMessage(
-          chatId, query.message.message_id,
-          captionStylesText(value),
-          env,
-          captionStylesKeyboard(value)
+      if (field === "caption_traits") {
+        if (value === "clear") {
+          await patchSettings(chatId, { captionTraits: [] }, env);
+          await editMessage(chatId, query.message.message_id, captionStylesText([]), env, captionStylesKeyboard());
+          await answerCallback(query.id, "Очищено", env);
+          return;
+        }
+
+        await setPending(chatId, userId, "set_caption_traits", env);
+        await answerCallback(query.id, "Жду список характеристик", env);
+        await sendMessage(
+          chatId,
+          "Пришлите короткие характеристики чата, каждую с новой строки.\n\n" +
+            "<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n" +
+            "<i>/cancel — отмена</i>",
+          env
         );
-        await answerCallback(query.id, "Стиль подписей изменён", env);
         return;
       }
 

@@ -42,9 +42,6 @@ import {
 } from "./styles.js";
 import {
   generateCaption,
-  DEFAULT_CHARACTER,
-  CAPTION_STYLES,
-  captionStyleTitle,
   getTextApiKeys,
   hasDedicatedTextKey,
   getTextModel,
@@ -141,26 +138,49 @@ async function rememberCaption(chatId, caption, env) {
   await env.BOT_KV.put(`captions:${chatId}`, JSON.stringify(next), { expirationTtl: 90 * 24 * 60 * 60 });
 }
 
-export function captionStylesKeyboard(current) {
-  const ids = Object.keys(CAPTION_STYLES);
-  const rows = [];
-  for (let i = 0; i < ids.length; i += 2) {
-    rows.push(ids.slice(i, i + 2).map((id) => ({
-      text: `${id === current ? "✅ " : ""}${CAPTION_STYLES[id].title}`,
-      callback_data: `s|caption_style|${id}`,
-    })));
-  }
-  rows.push([{ text: "◀️ Назад в меню", callback_data: "nav|menu" }]);
-  return { inline_keyboard: rows };
+function parseCaptionTraits(text) {
+  return String(text || "")
+    .split(/\n|,|;/)
+    .map((x) => x.replace(/^[-•*]\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .map((x) => x.slice(0, 80));
 }
 
-export function captionStylesText(current) {
-  const lines = ["✍️ <b>Стиль подписей</b>", ""];
-  for (const [id, s] of Object.entries(CAPTION_STYLES)) {
-    lines.push(`${id === current ? "✅ " : ""}<b>${s.title}</b> — ${escapeHtml(s.instruction)}`);
-  }
-  lines.push("", "<i>Работает, когда включены AI-подписи: /ai_on.</i>");
-  return lines.join("\n");
+function captionTraitsLabel(traits) {
+  const list = Array.isArray(traits) ? traits.filter(Boolean) : [];
+  return list.length ? list.join(", ") : "не заданы";
+}
+
+export function captionStylesKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "✍️ Задать характеристики", callback_data: "s|caption_traits|edit" }],
+      [{ text: "🗑 Очистить", callback_data: "s|caption_traits|clear" }],
+      [{ text: "◀️ Назад в меню", callback_data: "nav|menu" }],
+    ],
+  };
+}
+
+export function captionStylesText(settingsOrTraits = []) {
+  const traits = Array.isArray(settingsOrTraits)
+    ? settingsOrTraits
+    : settingsOrTraits?.captionTraits || [];
+  return [
+    "✍️ <b>Характеристики для AI-подписей</b>",
+    "",
+    "Это не готовый общий текст, а короткие признаки чата. Пишите каждую с новой строки:",
+    "",
+    "<code>ироничные\nинженеры\nдобрые\nлюбят мемы\nбез официоза</code>",
+    "",
+    "<b>Сейчас:</b>",
+    traits.length ? traits.map((t) => `• ${escapeHtml(t)}`).join("\n") : "<i>не заданы</i>",
+    "",
+    "Отправить список: <code>/caption_style</code>",
+    "Очистить: <code>/caption_style clear</code>",
+    "",
+    "<i>Если развёрнутый характер не задан, бот будет брать манеру из общих примеров и перефразировать их.</i>",
+  ].join("\n");
 }
 
 function selectPromptForTest(settings, value, now) {
@@ -262,7 +282,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     const recentCaptions = await getRecentCaptions(chatId, env);
 
     const generated = await generateCaption(env, {
-      character: settings.character || DEFAULT_CHARACTER,
+      character: settings.character || "",
       isWeekend: now.isWeekend,
       chatTitle: settings.title || "",
       examples: pickExamples(allExamples, 4),
@@ -271,7 +291,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       weekday: now.weekday,
       holidayName: now.holidayName || "",
       birthdays: birthdaysToday,
-      captionStyle: settings.captionStyle || "chatty",
+      captionTraits: settings.captionTraits || [],
       recentCaptions,
     });
     if (generated.ok) {
@@ -672,6 +692,7 @@ const KNOWN_COMMANDS = new Set([
 const PENDING_PROMPTS = {
   set_gdrive: "Пришлите ссылку на публичную папку Google Drive следующим сообщением.\n\n<i>/cancel — отмена</i>",
   set_search: "Пришлите поисковый запрос для картинок.\n\n<i>Пример: кот работяга</i>\n<i>/cancel — отмена</i>",
+  set_caption_traits: "Пришлите короткие характеристики чата, каждую с новой строки.\n\n<i>Например:</i>\n<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n<i>/cancel — отмена</i>",
   add_prompt_weekday: "Пришлите текст промпта для <b>будней</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>.\n\n<i>/cancel — отмена</i>",
@@ -709,7 +730,7 @@ export function menuKeyboard() {
         { text: "📝 Выходные", callback_data: "p|show|weekend" },
       ],
       [
-        { text: "✍️ Стиль подписей", callback_data: "nav|caption_style" },
+        { text: "✍️ Характеристики", callback_data: "nav|caption_style" },
         { text: "⚙️ Настройки", callback_data: "nav|settings" },
       ],
       [
@@ -1372,17 +1393,24 @@ export async function handleCommand(message, env, options = {}) {
     case "/caption_style": {
       const s = await getSettings(chatId, env);
       if (!value) {
-        await sendMessage(chatId, captionStylesText(s.captionStyle || "chatty"), env, {
-          reply_markup: captionStylesKeyboard(s.captionStyle || "chatty"),
+        await setPending(chatId, userId, "set_caption_traits", env);
+        await sendMessage(chatId, captionStylesText(s), env, {
+          reply_markup: captionStylesKeyboard(),
         });
         return;
       }
-      if (!CAPTION_STYLES[value]) {
-        await sendMessage(chatId, "Неизвестный стиль. Откройте /caption_style без аргументов.", env);
+      if (["clear", "off", "очистить", "сброс"].includes(value.toLowerCase())) {
+        await patchSettings(chatId, { captionTraits: [] }, env);
+        await sendMessage(chatId, "🗑 Характеристики AI-подписей очищены.", env);
         return;
       }
-      await patchSettings(chatId, { captionStyle: value, aiCaptions: true }, env);
-      await sendMessage(chatId, `✅ Стиль подписей: <b>${captionStyleTitle(value)}</b>. AI-подписи включены.`, env);
+      const traits = parseCaptionTraits(value);
+      if (!traits.length) {
+        await sendMessage(chatId, PENDING_PROMPTS.set_caption_traits, env);
+        return;
+      }
+      await patchSettings(chatId, { captionTraits: traits, aiCaptions: true }, env);
+      await sendMessage(chatId, `✅ Характеристики сохранены: <b>${escapeHtml(captionTraitsLabel(traits))}</b>. AI-подписи включены.`, env);
       return;
     }
 
@@ -1607,6 +1635,9 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "set_search":
       return applySearchQuery(text, chatId, env);
 
+    case "set_caption_traits":
+      return applyCaptionTraits(text, chatId, env);
+
     case "add_prompt_weekday":
       return addPrompt("weekday", text, chatId, env);
 
@@ -1642,6 +1673,23 @@ async function applyPendingValue(pending, text, chatId, env) {
       return;
     }
   }
+}
+
+async function applyCaptionTraits(text, chatId, env) {
+  const traits = parseCaptionTraits(text);
+  if (!traits.length) {
+    await sendMessage(chatId, "❌ Не нашёл характеристик. Напишите по одной на строку: <code>ироничные\nинженеры\nдобрые</code>", env);
+    return;
+  }
+
+  await patchSettings(chatId, { captionTraits: traits, aiCaptions: true }, env);
+  await sendMessage(
+    chatId,
+    "✅ Характеристики для AI-подписей сохранены:\n" +
+      traits.map((t) => `• ${escapeHtml(t)}`).join("\n") +
+      "\n\n🤖 AI-подписи включены. Проверить: /test",
+    env
+  );
 }
 
 async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
@@ -1741,7 +1789,7 @@ async function runDiagnostics(chatId, env) {
     ? `✅ Gemini текст: <code>${escapeHtml(getGeminiTextModel(env))}</code> — основной`
     : "➖ Gemini текст: нет GEMINI_API_KEY");
   lines.push(`OpenAI-compatible текст: <code>${escapeHtml(getTextModel(env))}</code>`);
-  lines.push(`Стиль подписей: <b>${captionStyleTitle(s.captionStyle || "chatty")}</b>`);
+  lines.push(`Характеристики подписей: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`);
 
   if (env.AI) {
     const u = await getUsage(env);
@@ -1999,7 +2047,7 @@ function helpText(role) {
     "",
     "<b>Подписи к картинкам</b>",
     "/set_character — характер чата (текстом или .txt файлом)",
-    "/caption_style — стиль AI-подписей",
+    "/caption_style — короткие характеристики для AI-подписей", 
     "/ai_on, /ai_off — писать подписи нейросетью",
     "",
     "<b>Модели и расписание</b>",
@@ -2072,7 +2120,7 @@ function settingsText(s, chatId, role) {
     `Поиск: <code>${escapeHtml(s.searchQuery || "не задан")}</code>`,
     `Модель NIM: <b>${s.nimModel}</b>`,
     `Стиль картинки: <b>${getStyle(s.imageStyle).title}</b>`,
-    `Стиль подписи: <b>${captionStyleTitle(s.captionStyle || "chatty")}</b>`,
+    `Характеристики подписей: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`,
     "",
     `Промпты будней: <b>${wd || "—"}</b>`,
     `Промпты выходных: <b>${we || "—"}</b>`,

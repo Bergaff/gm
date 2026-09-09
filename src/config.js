@@ -31,8 +31,9 @@ export const DEFAULT_SETTINGS = {
   character: "",
   // Генерировать подписи через LLM или брать готовые фразы
   aiCaptions: false,
-  // Стиль AI-подписей: balanced | chatty | ironic | warm | absurd
-  captionStyle: "chatty",
+  // Короткие характеристики чата для AI-подписей, по одной на строку:
+  // «ироничные», «инженеры», «добрые», «любят мемы».
+  captionTraits: [],
 
   // Кому в этом чате разрешено менять настройки: { "<userId>": {username, at} }
   grantedUsers: {},
