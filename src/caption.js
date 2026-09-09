@@ -15,8 +15,39 @@ const TIMEOUT_MS = 12000; // укладываемся в лимит waitUntil (3
 // Together, DeepSeek, OpenRouter, Mistral, LM Studio, Ollama и другие.
 // Достаточно поменять URL + ключ + модель.
 const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const DEFAULT_LLM_MODEL = "meta/llama-3.1-8b-instruct";
+const DEFAULT_LLM_MODEL = "meta/llama-3.3-70b-instruct";
+const DEFAULT_GEMINI_TEXT_MODEL = "gemini-2.5-flash";
 
+export const CAPTION_STYLES = {
+  balanced: {
+    title: "⚖️ Ровно",
+    instruction: "Тон: естественно, без официоза, умеренный юмор. 2–3 предложения.",
+  },
+  chatty: {
+    title: "💬 Как в чате",
+    instruction: "Тон: максимально похоже на живое сообщение участника этого чата. 2–4 предложения, можно конкретные шутки из описания чата.",
+  },
+  ironic: {
+    title: "😏 Иронично",
+    instruction: "Тон: лёгкая ирония, сарказм без злобы, рабочие приколы. 2–4 предложения.",
+  },
+  warm: {
+    title: "🫶 Тепло",
+    instruction: "Тон: тёплый, дружеский, поддерживающий, но без ванильных штампов. 2–4 предложения.",
+  },
+  absurd: {
+    title: "🌀 Абсурдно",
+    instruction: "Тон: чуть абсурдный чатовый юмор, но смысл должен быть понятен. 2–4 предложения.",
+  },
+};
+
+export function captionStyleTitle(id) {
+  return CAPTION_STYLES[id]?.title || CAPTION_STYLES.chatty.title;
+}
+
+function captionStyleInstruction(id) {
+  return CAPTION_STYLES[id]?.instruction || CAPTION_STYLES.chatty.instruction;
+}
 
 /**
  * Бесплатная генерация текста через Cloudflare Workers AI (binding env.AI).
@@ -24,6 +55,43 @@ const DEFAULT_LLM_MODEL = "meta/llama-3.1-8b-instruct";
  * Те же 10 000 нейронов/сутки, что и на картинки.
  */
 const CF_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
+export function getGeminiTextModel(env) {
+  return String(env.GEMINI_TEXT_MODEL || DEFAULT_GEMINI_TEXT_MODEL).trim().replace(/^models\//, "");
+}
+
+async function generateViaGemini(env, messages) {
+  const model = getGeminiTextModel(env);
+  const system = messages.find((m) => m.role === "system")?.content || "";
+  const user = messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n\n");
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: { "x-goog-api-key": env.GEMINI_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: system ? { parts: [{ text: system }] } : undefined,
+        contents: [{ role: "user", parts: [{ text: user }] }],
+        generationConfig: { temperature: 0.9, topP: 0.95, maxOutputTokens: 700 },
+      }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    }
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Gemini ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const text = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || "")
+    .join("")
+    .trim();
+  await addUsage(env, 0, "gemini");
+  return text;
+}
 
 async function generateViaCfBinding(env, messages) {
   const out = await env.AI.run(String(env.TEXT_API_MODEL || CF_TEXT_MODEL), {
@@ -179,7 +247,18 @@ const DAY_HINTS = {
 // Не всегда: иначе каждый понедельник будет об одном и том же.
 const DAY_MENTION_CHANCE = 0.5;
 
-function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "", birthdays = []) {
+function recentCaptionsBlock(recentCaptions) {
+  if (!Array.isArray(recentCaptions) || !recentCaptions.length) return "";
+  return (
+    "=== ПОСЛЕДНИЕ ПОДПИСИ В ЭТОМ ЧАТЕ ===\n" +
+    recentCaptions.map((c) => "— " + c).join("\n") +
+    "\n=== КОНЕЦ ПОСЛЕДНИХ ПОДПИСЕЙ ===\n\n" +
+    "Не повторяй их начало, структуру, ключевые шутки и финальные пожелания. " +
+    "Новая подпись должна звучать свежо, но в том же характере чата.\n\n"
+  );
+}
+
+function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "", holiday = "", birthdays = [], captionStyle = "chatty", recentCaptions = []) {
   const base = holiday
     ? `праздник «${holiday}» — выходной, никакой работы, можно отдыхать`
     : isWeekend
@@ -214,18 +293,19 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
         "1. Поздоровайся своими словами. Можно «Доброе утро», можно " +
         "иначе — лишь бы звучало живо и по-разному каждый раз. " +
         "НЕ копируй примеры из этой инструкции дословно.\n" +
-        "2. ДЛИНА СВОБОДНАЯ: иногда хватает одной короткой фразы, " +
-        "иногда нужно наблюдение на два предложения. Не дописывай " +
-        "ничего ради объёма: если мысль закончилась, останавливайся.\n" +
-        "3. До 250 символов.\n" +
-        "4. Без хэштегов, markdown и кавычек вокруг ответа.\n\n" +
+        "2. Пиши 2–4 предложения. Не одну сухую строку, а маленькое живое " +
+        "сообщение для своих. Можно добавить конкретную деталь из характера " +
+        "чата: работа, привычки, мемы, локальные шутки, типичные боли.\n" +
+        "3. Обычно 180–550 символов. Если мысль сильная — можно короче, " +
+        "но не превращай всё в одинаковое «доброе утро, хорошего дня».\n" +
+        "4. Без хэштегов, markdown и кавычек вокруг ответа.\n" +
+        "5. " + captionStyleInstruction(captionStyle) + "\n\n" +
         "ЗАПРЕЩЕНО писать безликие штампы вроде «Пусть день будет " +
         "продуктивным», «Начинаем день на позитиве», «Отличного дня». " +
         "Такие фразы — провал задачи.\n\n" +
-        "СМЫСЛ ВАЖНЕЕ ОРИГИНАЛЬНОСТИ. Лучше простая понятная фраза, чем " +
-        "красивый набор слов. Если получается бессвязица вроде " +
-        "«Картонами полицейские стоят на каждом углу» — выброси и напиши " +
-        "проще. Каждое предложение должно быть осмысленным по-русски.\n\n" +
+        "СМЫСЛ ВАЖНЕЕ ОРИГИНАЛЬНОСТИ. Можно шутить и писать характерно, " +
+        "но каждое предложение должно быть осмысленным по-русски. Если шутка " +
+        "получается бессвязной — переформулируй, а не уходи в общий шаблон.\n\n" +
         "ЯЗЫК: пиши СТРОГО на русском языке, кириллицей. Ни одного слова " +
         "и ни одного символа на английском, китайском, арабском или любом " +
         "другом языке. Латиница допустима только в общепринятых названиях " +
@@ -240,6 +320,7 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
         (birthdayNames
           ? `ДЕНЬ РОЖДЕНИЯ: сегодня день рождения у ${birthdayNames}. Обязательно поздравь их тепло, но коротко.\n\n`
           : "") +
+        recentCaptionsBlock(recentCaptions) +
         exampleBlock(examples) +
         "Верни ТОЛЬКО текст приветствия.",
     },
@@ -265,7 +346,7 @@ function cleanup(text) {
 
   // Обрезаем по последнему законченному предложению, а не по символу:
   // иначе подпись обрывалась на полуслове («профессиональной денонсаци»).
-  out = trimToSentence(out, 400);
+  out = trimToSentence(out, 700);
 
   return out;
 }
@@ -353,18 +434,45 @@ export async function generateCaption(env, options = {}) {
     weekday = "",
     holidayName = "",
     birthdays = [],
+    captionStyle = "chatty",
+    recentCaptions = [],
   } = options;
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
   const started = Date.now();
-  const messages = buildPrompt(character, isWeekend, chatTitle, examples, weekday, holidayName, birthdays);
+  const messages = buildPrompt(
+    character,
+    isWeekend,
+    chatTitle,
+    examples,
+    weekday,
+    holidayName,
+    birthdays,
+    captionStyle,
+    recentCaptions
+  );
   let lastError = null;
 
-  // ПРИОРИТЕТ: сначала бесплатный Cloudflare Workers AI. Внешние ключи
-  // (NVIDIA и прочие) — только если он недоступен или не справился.
-  // Отключить приоритет: секрет PREFER_EXTERNAL_TEXT = "1".
-  const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
+  // ПРИОРИТЕТ: Gemini 2.5 Flash (если есть GEMINI_API_KEY) — обычно заметно
+  // лучше понимает русский стиль чата, чем бесплатная Llama 8B в Workers AI.
+  // Потом — внешний OpenAI-compatible API, потом Cloudflare как fallback.
+  if (env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
+    try {
+      const text = cleanup(await generateViaGemini(env, messages));
+      const problem = captionProblem(text);
+      if (text && !problem) {
+        return { ok: true, text, model: "gemini/" + getGeminiTextModel(env),
+                 latency: Date.now() - started };
+      }
+      lastError = problem ? `Gemini выдал брак (${problem})` : "Gemini вернул пустой ответ";
+    } catch (e) {
+      lastError = String(e?.message || e).slice(0, 180);
+    }
+  }
+
+  // Cloudflare можно принудительно оставить первым: PREFER_CF_TEXT=1.
+  const preferCf = env.AI && String(env.PREFER_CF_TEXT || "") === "1";
 
   if (preferCf) {
       try {
@@ -535,7 +643,23 @@ export async function translatePrompt(prompt, env) {
 
   const keys = getTextApiKeys(env);
 
-  // Приоритет — бесплатный Workers AI, внешние ключи запасные
+  if (env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
+    try {
+      const t = await generateViaGemini(env, [
+        { role: "system", content: "Translate the user's image-generation prompt from Russian to English. Reply with the English prompt only. No explanations, no quotes." },
+        { role: "user", content: original },
+      ]);
+      const clean = String(t || "").trim().replace(/^["«„']+|["»“']+$/g, "");
+      if (clean && !needsTranslation(clean)) {
+        try { await env.BOT_KV.put(key, clean, { expirationTtl: 90 * 24 * 60 * 60 }); } catch {}
+        return { text: clean, translated: true, cached: false, provider: "gemini" };
+      }
+    } catch {
+      // не вышло — пробуем остальные способы ниже
+    }
+  }
+
+  // Приоритет для перевода — бесплатный Workers AI, внешние ключи запасные
   const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
 
   if (preferCf || !keys.length) {

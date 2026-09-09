@@ -157,8 +157,8 @@ export async function usageText(env, escapeHtml) {
     `📞 вызовов: ${today.calls}`,
     "",
     "<b>Другие провайдеры</b>",
-    `🍌 Gemini: ${today.gemini || 0} картинок` +
-      (today.gemini ? " (свой лимит ~500/сутки)" : ""),
+    `🍌 Gemini: ${today.gemini || 0} запросов` +
+      (today.gemini ? " (картинки/текст, свой бесплатный лимит)" : ""),
     `🟢 NVIDIA: ${today.nvidia || 0} картинок` +
       (today.nvidia ? " (расход кредитов)" : ""),
   ];

@@ -6,7 +6,7 @@ Telegram-бот, который каждое утро присылает «До�
 
 - Картинки из публичной папки **Google Drive**, генерация через современные провайдеры (Cloudflare Workers AI / Gemini / NVIDIA NIM) или поиск картинок через **Google/Yandex Images** с safe-фильтром
 - Разное время и разные тексты для **будней, выходных, выбранных праздников и дней рождения**
-- Отдельные настройки **для каждого чата**
+- Отдельные настройки **для каждого чата**, включая характер и стиль AI-подписей
 - Время можно задать **диапазоном** (`09:00-09:40`) — бот выберет случайную минуту
 - Кнопки **👍 / 👎** под каждым постом
 - **Статистика** по моделям, чатам и лайкам — доступна только Telegram ID из `ADMIN_IDS`
@@ -29,7 +29,8 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `BOT_TOKEN`
 - `GOOGLE_API_KEY`
 - `NVIDIA_API_KEY`
-- `GEMINI_API_KEY` — опционально, Gemini 2.5 Flash Image
+- `GEMINI_API_KEY` — опционально, Gemini 2.5 Flash Image и Gemini 2.5 Flash для более живых текстов
+- `GEMINI_TEXT_MODEL` — опционально, по умолчанию `gemini-2.5-flash`
 - `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов
 - `GOOGLE_SEARCH_CX` — опционально для источника `search` (Google Programmable Search Engine)
 - `GOOGLE_SEARCH_API_KEY` — опционально; если не задан, используется `GOOGLE_API_KEY`

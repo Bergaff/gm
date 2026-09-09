@@ -15,6 +15,8 @@ import {
   changeKeyboard,
   changeModelsKeyboard,
   changeModelsText,
+  captionStylesKeyboard,
+  captionStylesText,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -173,6 +175,9 @@ export async function handleCallback(query, env) {
     } else if (screen === "style") {
       await editMessage(chatId, mid, stylesText(s.imageStyle, (t) => String(t)), env,
         stylesKeyboard(s.imageStyle));
+    } else if (screen === "caption_style") {
+      await editMessage(chatId, mid, captionStylesText(s.captionStyle || "chatty"), env,
+        captionStylesKeyboard(s.captionStyle || "chatty"));
     } else if (screen === "models") {
       let stats = {};
       try { stats = await votesByProvider(env, chatId); } catch { stats = {}; }
@@ -212,6 +217,18 @@ export async function handleCallback(query, env) {
         await patchSettings(chatId, { source: value }, env);
         await editMarkup(chatId, query.message.message_id, sourceKeyboard(value), env);
         await answerCallback(query.id, `Источник: ${value}`, env);
+        return;
+      }
+
+      if (field === "caption_style") {
+        await patchSettings(chatId, { captionStyle: value, aiCaptions: true }, env);
+        await editMessage(
+          chatId, query.message.message_id,
+          captionStylesText(value),
+          env,
+          captionStylesKeyboard(value)
+        );
+        await answerCallback(query.id, "Стиль подписей изменён", env);
         return;
       }
 
