@@ -32,9 +32,11 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `GEMINI_API_KEY` — опционально, Gemini 2.5 Flash Image и Gemini 2.5 Flash для более живых текстов
 - `GEMINI_TEXT_MODEL` — опционально, по умолчанию `gemini-2.5-flash`
 - `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов
-- `SERPER_API_KEY` — опционально для источника `search` (Google Images через Serper)
+- `PIXABAY_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pixabay)
+- `PEXELS_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pexels)
+- `SERPER_API_KEY` — опционально для источника `search` (Google Images через Serper, trial credits)
 - `BRAVE_SEARCH_API_KEY` — опционально для источника `search` (Brave Images)
 - `GOOGLE_SEARCH_CX` — опционально для источника `search` (старый Google Programmable Search Engine, если уже был включён full web)
 - `GOOGLE_SEARCH_API_KEY` — опционально; если не задан, используется `GOOGLE_API_KEY`
-- `IMAGE_SEARCH_PROVIDER` — `auto`, `serper`, `brave`, `google` или `yandex` (по умолчанию `auto`)
+- `IMAGE_SEARCH_PROVIDER` — `auto`, `pixabay`, `pexels`, `serper`, `brave`, `google` или `yandex` (по умолчанию `auto`)
 - `WEBHOOK_SECRET`

@@ -1768,6 +1768,8 @@ async function runDiagnostics(chatId, env) {
   lines.push("<b>Ключи</b>");
   lines.push(`${env.BOT_TOKEN ? "✅" : "❌"} BOT_TOKEN`);
   lines.push(`${env.GOOGLE_API_KEY ? "✅" : "❌"} GOOGLE_API_KEY`);
+  lines.push(`${env.PIXABAY_API_KEY ? "✅" : "➖"} Pixabay Images: PIXABAY_API_KEY`);
+  lines.push(`${env.PEXELS_API_KEY ? "✅" : "➖"} Pexels Images: PEXELS_API_KEY`);
   lines.push(`${env.SERPER_API_KEY ? "✅" : "➖"} Serper Images: SERPER_API_KEY`);
   lines.push(`${env.BRAVE_SEARCH_API_KEY ? "✅" : "➖"} Brave Images: BRAVE_SEARCH_API_KEY`);
   lines.push(`${(env.GOOGLE_SEARCH_API_KEY || env.GOOGLE_API_KEY) && (env.GOOGLE_SEARCH_CX || env.GOOGLE_SEARCH_ENGINE_ID || env.GOOGLE_CSE_ID) ? "✅" : "➖"} Google CSE Images: GOOGLE_SEARCH_CX + ключ`);

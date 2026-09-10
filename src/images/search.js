@@ -119,6 +119,82 @@ function unescapeJsonString(value) {
   }
 }
 
+async function pixabaySearch(query, env, force = false) {
+  if (!env.PIXABAY_API_KEY) throw new Error("для Pixabay нужен PIXABAY_API_KEY");
+
+  const page = Math.max(1, Math.floor(Math.random() * 8) + 1);
+  const cacheKey = `imgsearch:pixabay:${hash(query)}:${page}`;
+  if (!force) {
+    const cached = await env.BOT_KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.length) return cached;
+  }
+
+  const url =
+    "https://pixabay.com/api/" +
+    `?key=${encodeURIComponent(env.PIXABAY_API_KEY)}` +
+    `&q=${encodeURIComponent(query)}` +
+    "&image_type=photo&safesearch=true&per_page=50&orientation=all" +
+    `&page=${page}`;
+
+  const response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Pixabay HTTP ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const items = (data.hits || []).map((item) => ({
+    link: item.largeImageURL || item.webformatURL,
+    title: item.tags || query,
+    contextLink: item.pageURL || "pixabay.com",
+    mime: "image/jpeg",
+    width: item.imageWidth || null,
+    height: item.imageHeight || null,
+  })).filter(imageLike);
+
+  await env.BOT_KV.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+  return unique(items);
+}
+
+async function pexelsSearch(query, env, force = false) {
+  if (!env.PEXELS_API_KEY) throw new Error("для Pexels нужен PEXELS_API_KEY");
+
+  const page = Math.max(1, Math.floor(Math.random() * 8) + 1);
+  const cacheKey = `imgsearch:pexels:${hash(query)}:${page}`;
+  if (!force) {
+    const cached = await env.BOT_KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.length) return cached;
+  }
+
+  const url =
+    "https://api.pexels.com/v1/search" +
+    `?query=${encodeURIComponent(query)}` +
+    "&per_page=40&orientation=square" +
+    `&page=${page}`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: env.PEXELS_API_KEY, Accept: "application/json" },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Pexels HTTP ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const items = (data.photos || []).map((item) => ({
+    link: item.src?.large2x || item.src?.large || item.src?.original,
+    title: item.alt || query,
+    contextLink: item.photographer_url || item.url || "pexels.com",
+    mime: "image/jpeg",
+    width: item.width || null,
+    height: item.height || null,
+  })).filter(imageLike);
+
+  await env.BOT_KV.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+  return unique(items);
+}
+
 async function serperSearch(query, env, force = false) {
   if (!env.SERPER_API_KEY) throw new Error("для Serper нужен SERPER_API_KEY");
 
@@ -243,14 +319,18 @@ async function yandexSearch(query, env, force = false) {
 async function searchImages(query, env, force = false) {
   const provider = String(env.IMAGE_SEARCH_PROVIDER || "auto").toLowerCase();
 
+  if (provider === "pixabay") return { provider, results: await pixabaySearch(query, env, force) };
+  if (provider === "pexels") return { provider, results: await pexelsSearch(query, env, force) };
   if (provider === "serper") return { provider, results: await serperSearch(query, env, force) };
   if (provider === "brave") return { provider, results: await braveSearch(query, env, force) };
   if (provider === "yandex") return { provider, results: await yandexSearch(query, env, force) };
   if (provider === "google") return { provider, results: await googleSearch(query, env, force) };
 
-  // auto: сначала Serper (реальный Google Images через JSON API), затем Brave,
-  // затем старый Google CSE, затем неофициальный Yandex как последний шанс.
+  // auto: сначала постоянные бесплатные стоковые API, затем trial/credit API,
+  // затем старый Google CSE и неофициальный Yandex как последний шанс.
   const order = [
+    ["pixabay", pixabaySearch],
+    ["pexels", pexelsSearch],
     ["serper", serperSearch],
     ["brave", braveSearch],
     ["google", googleSearch],
