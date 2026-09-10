@@ -253,49 +253,77 @@ export const CF_PROVIDERS = [
  * Формат ответа отличается от остальных: картинка лежит в
  * candidates[0].content.parts[].inlineData.data (base64).
  */
-export const GEMINI_PROVIDERS = [
-  {
-    // Gemini 3 Pro Image — лучше всех рисует текст и знает русский, НО
-    // по таблице цен Google у него Free Tier = «Not available»: без
-    // включённого биллинга он всегда отдаёт ошибку и просто съедает
-    // один субреквест на каждой генерации. Поэтому по умолчанию скрыт.
-    // Включить обратно: секрет GEMINI_PRO=1
-    paidOnly: true,
-    id: "gemini-3-pro",
-    title: "Gemini 3 Pro Image (лучшее качество, знает русский)",
+const DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image-preview";
+const DEFAULT_GEMINI_IMAGE_MODELS = [
+  "gemini-2.5-flash-image-preview",
+  "gemini-2.5-flash-image",
+];
+const GEMINI_PRO_IMAGE_MODEL = "gemini-3-pro-image-preview";
+
+export function getGeminiImageModels(env) {
+  const raw = env?.GEMINI_IMAGE_MODELS || env?.GEMINI_IMAGE_MODEL || "";
+  const configured = String(raw)
+    .split(/[,\s]+/)
+    .map((m) => m.trim().replace(/^models\//, ""))
+    .filter(Boolean);
+  const allowPaid = String(env?.GEMINI_PRO || "") === "1";
+  const models = [
+    ...configured,
+    ...DEFAULT_GEMINI_IMAGE_MODELS,
+    DEFAULT_GEMINI_IMAGE_MODEL,
+    ...(allowPaid ? [GEMINI_PRO_IMAGE_MODEL] : []),
+  ];
+  return [...new Set(models)];
+}
+
+function geminiImagePrompt(prompt, negative = "") {
+  const avoid = [
+    "readable text", "captions", "watermarks", "logos", "NSFW", "nudity",
+    String(negative || ""),
+  ].filter(Boolean).join(", ");
+
+  return [
+    "Generate one square safe-for-work image.",
+    `Main scene, subject and action that MUST be followed exactly: ${prompt}`,
+    "Do not replace the requested subject with a generic morning scene.",
+    "Keep the composition simple and focused on the requested subject.",
+    avoid ? `Avoid: ${avoid}.` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function geminiImageTitle(model) {
+  if (model.includes("3-pro")) return "Gemini 3 Pro Image (лучшее качество, может быть платным)";
+  if (model.includes("preview")) return "Gemini 2.5 Flash Image Preview";
+  return "Gemini 2.5 Flash Image";
+}
+
+function geminiImageProvider(model, index) {
+  // id gemini-image оставляем для обратной совместимости с уже выбранной
+  // вручную моделью в настройках чатов.
+  const id = index === 0 ? "gemini-image" : `gemini-image-${model.replace(/[^a-z0-9]+/gi, "-")}`;
+  return {
+    id,
+    title: geminiImageTitle(model),
     gemini: true,
-    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    model,
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     keyEnv: "GEMINI_API_KEY",
-    build: (prompt) => ({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["IMAGE"] },
-    }),
-  },
-  {
-    id: "gemini-image",
-    title: "Gemini 2.5 Flash Image (быстрее, только английский)",
-    gemini: true,
-    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
-    keyEnv: "GEMINI_API_KEY",
-    // ВАЖНО: у этой модели в примерах Google стоит TEXT + IMAGE.
-    // С одним лишь ["IMAGE"] она отвечает 400 «does not support the
+    // ВАЖНО: у Flash Image в примерах Google стоит TEXT + IMAGE.
+    // С одним лишь ["IMAGE"] она может отвечать 400 «does not support the
     // requested response modalities». Картинку берём из inlineData,
     // текстовую часть просто игнорируем.
-    build: (prompt) => ({
-      contents: [{ parts: [{ text: prompt }] }],
+    build: (prompt, seed, negative) => ({
+      contents: [{ parts: [{ text: geminiImagePrompt(prompt, negative) }] }],
       generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
     }),
-  },
-];
+  };
+}
+
+export const GEMINI_PROVIDERS = [];
 
 function getGeminiProviders(env) {
   if (!env || !env.GEMINI_API_KEY) return [];
-
-  // Платные модели показываем, только если явно разрешили секретом
-  // GEMINI_PRO=1. Иначе они висят в списке, всегда падают и путают.
-  const allowPaid = String(env.GEMINI_PRO || "") === "1";
-
-  return GEMINI_PROVIDERS.filter((p) => allowPaid || !p.paidOnly);
+  return getGeminiImageModels(env).map((model, index) => geminiImageProvider(model, index));
 }
 
 
@@ -368,7 +396,7 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
     const response = await fetch(provider.url, {
       method: "POST",
       headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
-      body: JSON.stringify(provider.build(prompt, seed)),
+      body: JSON.stringify(provider.build(prompt, seed, negative)),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 

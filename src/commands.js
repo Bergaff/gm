@@ -321,8 +321,10 @@ function enforcePrompt(prompt) {
   // Жёстко фиксируем главный объект/действие, но не меняем смысл запроса.
   return (
     `Create exactly this scene: ${base}. ` +
-    "The main subject, action and mood must match the user's prompt; " +
-    "do not substitute unrelated random objects."
+    "The main subject, action, objects and mood from the user's prompt are mandatory. " +
+    "If style words conflict with the scene, the scene wins. " +
+    "Do not substitute a generic sunrise, coffee cup, landscape, or unrelated random objects. " +
+    "No readable text, no watermark, safe for work."
   );
 }
 

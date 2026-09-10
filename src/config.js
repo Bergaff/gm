@@ -48,7 +48,8 @@ export const DEFAULT_SETTINGS = {
   // { "<userId>": { date: "MM-DD", name, username, setBy, updatedAt } }
   birthdays: {},
 
-  // Пользовательские праздники этого чата: { "MM-DD": "Название" }
+  // Пользовательские праздники этого чата:
+  // { "MM-DD": { name: "Название", isWeekend: true|false } }
   holidays: {}, 
 
   // auto | конкретный id провайдера из nim.js
