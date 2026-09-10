@@ -373,6 +373,12 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   const now = withChatHoliday(localParts(settings.timezone), settings);
   const birthdaysToday = birthdayPeople(settings, now.date);
 
+  // /test не должен съедать дневную квоту Gemini. Gemini оставляем для
+  // реальных утренних отправок, а тестовые подписи/переводы гоняем через
+  // Cloudflare или внешний fallback без Gemini.
+  const textEnv = test ? { ...env, DISABLE_GEMINI_TEXT: "1" } : env;
+  const testTextProvider = String(env.TEST_TEXT_PROVIDER || (env.AI ? "cf" : "external"));
+
   // Подпись: либо генерирует нейросеть под характер чата, либо готовая фраза.
   let text = pickTemplate(now);
   if (birthdaysToday.length && !settings.aiCaptions) {
@@ -388,7 +394,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     const allExamples = await getExamples(env);
     const recentCaptions = await getRecentCaptions(chatId, env);
 
-    const generated = await generateCaption(env, {
+    const generated = await generateCaption(textEnv, {
       character: settings.character || "",
       isWeekend: now.isWeekend,
       chatTitle: settings.title || "",
@@ -400,7 +406,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       birthdays: birthdaysToday,
       captionTraits: settings.captionTraits || [],
       recentCaptions,
-      textProvider: settings.textProvider || "gemini",
+      textProvider: test ? testTextProvider : (settings.textProvider || "gemini"),
     });
     if (generated.ok) {
       text = generated.text;
@@ -447,7 +453,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   let promptError = null;
 
   if (useNim && needsTranslation(rawPrompt)) {
-    const tr = await translatePrompt(rawPrompt, env);
+    const tr = await translatePrompt(rawPrompt, textEnv);
     activePrompt = tr.text;
     promptTranslated = tr.translated;
 
@@ -510,7 +516,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     let fallbackPromptError = null;
 
     if (needsTranslation(rawPrompt)) {
-      const tr = await translatePrompt(rawPrompt, env);
+      const tr = await translatePrompt(rawPrompt, textEnv);
       fallbackPrompt = tr.text;
       if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
     }
@@ -575,7 +581,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       let fallbackPromptError = null;
 
       if (needsTranslation(rawPrompt)) {
-        const tr = await translatePrompt(rawPrompt, env);
+        const tr = await translatePrompt(rawPrompt, textEnv);
         fallbackPrompt = tr.text;
         if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
       }

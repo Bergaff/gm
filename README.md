@@ -34,6 +34,7 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `GEMINI_TEXT_MODEL` — опционально, первая Gemini-модель для текста; по умолчанию `gemini-3.5-flash`
 - `GEMINI_TEXT_MODELS` — опционально, список Gemini-моделей для текста через запятую/пробел; бот пробует их по очереди, затем встроенный список `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`
 - `IMAGE_PINNED_FALLBACK=1` — разрешить старое поведение: если вручную выбранная модель картинок упала, пробовать остальные; по умолчанию ручной выбор строгий
+- `TEST_TEXT_PROVIDER` — опционально, чем писать AI-подписи в `/test`; по умолчанию `cf`, Gemini в тестах не используется и остаётся только для утренних отправок
 - `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов; для NVIDIA старый `meta/llama-3.3-70b-instruct` замените на `qwen/qwen3-next-80b-a3b-instruct`
 - `PIXABAY_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pixabay)
 - `PEXELS_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pexels)
