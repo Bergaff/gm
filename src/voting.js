@@ -34,6 +34,7 @@ import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders, markOpenRouterImageModelBad, openRouterModelFromTitle } from "./images/nim.js";
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 import { localParts, withChatHoliday } from "./scheduler.js";
+import { acquireTestLock, releaseTestLock } from "./testLock.js";
 
 function shortHash(text) {
   let value = 2166136261;
@@ -170,16 +171,27 @@ export async function handleCallback(query, env) {
       return;
     }
 
+    const acquired = await acquireTestLock(env, chatId, userId);
+    if (!acquired.ok) {
+      await answerCallback(query.id, "⏳ Уже идёт другой тест. Дождитесь результата.", env, true);
+      return;
+    }
+
     await answerCallback(query.id, "Делаю тест", env);
     const status = await sendMessage(chatId, `⏳ Тестирую промпт: <b>${label}</b>\n\n<i>${escapeHtml(prompt)}</i>`, env);
-    const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: prompt });
-    const finalText = morningTestReport(result);
-    const mid = status?.result?.message_id;
-    if (mid) {
-      const edited = await editMessage(chatId, mid, finalText, env);
-      if (!edited?.ok) await sendMessage(chatId, finalText, env);
-    } else {
-      await sendMessage(chatId, finalText, env);
+
+    try {
+      const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: prompt });
+      const finalText = morningTestReport(result);
+      const mid = status?.result?.message_id;
+      if (mid) {
+        const edited = await editMessage(chatId, mid, finalText, env);
+        if (!edited?.ok) await sendMessage(chatId, finalText, env);
+      } else {
+        await sendMessage(chatId, finalText, env);
+      }
+    } finally {
+      await releaseTestLock(env, acquired);
     }
     return;
   }
