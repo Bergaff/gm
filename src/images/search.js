@@ -119,6 +119,86 @@ function unescapeJsonString(value) {
   }
 }
 
+async function serperSearch(query, env, force = false) {
+  if (!env.SERPER_API_KEY) throw new Error("для Serper нужен SERPER_API_KEY");
+
+  const cacheKey = `imgsearch:serper:${hash(query)}`;
+  if (!force) {
+    const cached = await env.BOT_KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.length) return cached;
+  }
+
+  const response = await fetch("https://google.serper.dev/images", {
+    method: "POST",
+    headers: {
+      "X-API-KEY": env.SERPER_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ q: query, gl: "ru", hl: "ru", safe: "active", num: 30 }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Serper Images HTTP ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const items = (data.images || []).map((item) => ({
+    link: item.imageUrl || item.thumbnailUrl,
+    title: item.title || "",
+    contextLink: item.link || item.source || item.domain || "",
+    mime: "",
+    width: item.imageWidth || null,
+    height: item.imageHeight || null,
+  })).filter(imageLike);
+
+  await env.BOT_KV.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+  return unique(items);
+}
+
+async function braveSearch(query, env, force = false) {
+  if (!env.BRAVE_SEARCH_API_KEY) throw new Error("для Brave Search нужен BRAVE_SEARCH_API_KEY");
+
+  const cacheKey = `imgsearch:brave:${hash(query)}`;
+  if (!force) {
+    const cached = await env.BOT_KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.length) return cached;
+  }
+
+  const url =
+    "https://api.search.brave.com/res/v1/images/search" +
+    `?q=${encodeURIComponent(query)}` +
+    "&country=ALL&search_lang=ru&count=50&safesearch=strict";
+
+  const response = await fetch(url, {
+    headers: {
+      "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Brave Images HTTP ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const items = (data.results || []).map((item) => ({
+    link: item.properties?.url || item.thumbnail?.src,
+    title: item.title || "",
+    contextLink: item.url || item.source || "",
+    mime: item.properties?.format ? `image/${String(item.properties.format).toLowerCase()}` : "",
+    width: item.properties?.width || null,
+    height: item.properties?.height || null,
+  })).filter(imageLike);
+
+  await env.BOT_KV.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+  return unique(items);
+}
+
 async function yandexSearch(query, env, force = false) {
   const p = Math.floor(Math.random() * 8);
   const cacheKey = `imgsearch:yandex:${hash(query)}:${p}`;
@@ -161,19 +241,33 @@ async function yandexSearch(query, env, force = false) {
 }
 
 async function searchImages(query, env, force = false) {
-  const provider = String(env.IMAGE_SEARCH_PROVIDER || "google").toLowerCase();
+  const provider = String(env.IMAGE_SEARCH_PROVIDER || "auto").toLowerCase();
 
-  if (provider === "yandex") return yandexSearch(query, env, force);
-  if (provider === "google") return googleSearch(query, env, force);
+  if (provider === "serper") return { provider, results: await serperSearch(query, env, force) };
+  if (provider === "brave") return { provider, results: await braveSearch(query, env, force) };
+  if (provider === "yandex") return { provider, results: await yandexSearch(query, env, force) };
+  if (provider === "google") return { provider, results: await googleSearch(query, env, force) };
 
-  // auto: сначала Google с safe=active, потом Yandex family=yes.
-  try {
-    return await googleSearch(query, env, force);
-  } catch (e) {
-    const y = await yandexSearch(query, env, force);
-    if (y.length) return y;
-    throw e;
+  // auto: сначала Serper (реальный Google Images через JSON API), затем Brave,
+  // затем старый Google CSE, затем неофициальный Yandex как последний шанс.
+  const order = [
+    ["serper", serperSearch],
+    ["brave", braveSearch],
+    ["google", googleSearch],
+    ["yandex", yandexSearch],
+  ];
+
+  let lastError = null;
+  for (const [name, fn] of order) {
+    try {
+      const results = await fn(query, env, force);
+      if (results.length) return { provider: name, results };
+    } catch (e) {
+      lastError = e;
+    }
   }
+
+  throw lastError || new Error("нет доступных поисковых провайдеров");
 }
 
 async function downloadCandidate(url) {
@@ -205,16 +299,16 @@ export async function getSearchImage(chatId, queryValue, env, avoidLast = 30) {
   const recentKey = `imgsearch:recent:${chatId}:${hash(query)}`;
   const recent = (await env.BOT_KV.get(recentKey, "json").catch(() => null)) || [];
 
-  let results = await searchImages(query, env, false);
-  if (!results.length) results = await searchImages(query, env, true);
-  if (!results.length) throw new Error("поиск не нашёл подходящих картинок");
+  let found = await searchImages(query, env, false);
+  if (!found.results.length) found = await searchImages(query, env, true);
+  if (!found.results.length) throw new Error("поиск не нашёл подходящих картинок");
 
-  let pool = results.filter((r) => !recent.includes(r.link));
+  let pool = found.results.filter((r) => !recent.includes(r.link));
   if (!pool.length) {
     // Пробуем свежую страницу, но если вариантов всё равно нет — разрешаем старые,
     // иначе бот перестанет слать картинки на узком запросе.
-    const fresh = await searchImages(query, env, true).catch(() => []);
-    const merged = unique([...fresh, ...results]);
+    const fresh = await searchImages(query, env, true).catch(() => ({ provider: found.provider, results: [] }));
+    const merged = unique([...fresh.results, ...found.results]);
     pool = merged.filter((r) => !recent.includes(r.link));
     if (!pool.length) pool = merged;
   }
@@ -231,7 +325,7 @@ export async function getSearchImage(chatId, queryValue, env, avoidLast = 30) {
       return {
         ok: true,
         bytes: downloaded.bytes,
-        provider: `search:${String(env.IMAGE_SEARCH_PROVIDER || "google").toLowerCase()}`,
+        provider: `search:${found.provider}`,
         model: "image-search",
         assetRef: item.link,
         assetName: item.title || query,

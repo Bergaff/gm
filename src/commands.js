@@ -1768,8 +1768,10 @@ async function runDiagnostics(chatId, env) {
   lines.push("<b>Ключи</b>");
   lines.push(`${env.BOT_TOKEN ? "✅" : "❌"} BOT_TOKEN`);
   lines.push(`${env.GOOGLE_API_KEY ? "✅" : "❌"} GOOGLE_API_KEY`);
-  lines.push(`${(env.GOOGLE_SEARCH_API_KEY || env.GOOGLE_API_KEY) && (env.GOOGLE_SEARCH_CX || env.GOOGLE_SEARCH_ENGINE_ID || env.GOOGLE_CSE_ID) ? "✅" : "❌"} Google Image Search: GOOGLE_SEARCH_CX + ключ`);
-  lines.push(`Поиск картинок: <code>${escapeHtml(String(env.IMAGE_SEARCH_PROVIDER || "google"))}</code>`);
+  lines.push(`${env.SERPER_API_KEY ? "✅" : "➖"} Serper Images: SERPER_API_KEY`);
+  lines.push(`${env.BRAVE_SEARCH_API_KEY ? "✅" : "➖"} Brave Images: BRAVE_SEARCH_API_KEY`);
+  lines.push(`${(env.GOOGLE_SEARCH_API_KEY || env.GOOGLE_API_KEY) && (env.GOOGLE_SEARCH_CX || env.GOOGLE_SEARCH_ENGINE_ID || env.GOOGLE_CSE_ID) ? "✅" : "➖"} Google CSE Images: GOOGLE_SEARCH_CX + ключ`);
+  lines.push(`Поиск картинок: <code>${escapeHtml(String(env.IMAGE_SEARCH_PROVIDER || "auto"))}</code>`);
 
   lines.push(`${env.GEMINI_API_KEY ? "✅" : "➖"} GEMINI_API_KEY (Gemini картинки)`);
   lines.push(`${env.AI ? "✅" : "➖"} Cloudflare Workers AI binding`);
