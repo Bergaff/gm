@@ -1,4 +1,4 @@
-// Ограничение тяжёлых /test: одновременно выполняется только один тест.
+// Ограничение тяжёлых /test: одновременно выполняется только один тест в чате.
 // Нужен KV-lock, потому что кнопки /test могут нажать несколько человек подряд,
 // и каждый тест тратит запросы к генераторам картинок/текста.
 
@@ -10,11 +10,12 @@ function ttl(env) {
 }
 
 function key(env, chatId) {
-  // По умолчанию один тест на всего бота. Если когда-нибудь понадобится
-  // параллелить по чатам: TEST_LOCK_SCOPE=chat.
-  return String(env?.TEST_LOCK_SCOPE || "global") === "chat"
-    ? `test:lock:${chatId}`
-    : "test:lock:global";
+  // По умолчанию ограничение действует отдельно на каждый чат.
+  // Если понадобится снова сделать один общий тест на всего бота:
+  // TEST_LOCK_SCOPE=global.
+  return String(env?.TEST_LOCK_SCOPE || "chat") === "global"
+    ? "test:lock:global"
+    : `test:lock:${chatId}`;
 }
 
 export async function acquireTestLock(env, chatId, userId) {
