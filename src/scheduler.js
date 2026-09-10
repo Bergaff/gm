@@ -60,6 +60,18 @@ export function weekdayRu(weekday) {
   return RU_WEEKDAY[weekday] || "";
 }
 
+export function withChatHoliday(now, settings = {}) {
+  const custom = settings.holidays?.[String(now.date || "").slice(5, 10)];
+  if (!custom) return now;
+  return {
+    ...now,
+    isWeekend: true,
+    isHoliday: true,
+    holidayName: String(custom),
+    customHoliday: true,
+  };
+}
+
 export function parseTimeSpec(spec) {
   const single = /^([01]\d|2[0-3]):([0-5]\d)$/;
   const range = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/;
@@ -104,7 +116,7 @@ export async function runScheduler(env) {
       const settings = await getSettings(chatId, env);
       if (!settings.enabled) continue;
 
-      const now = localParts(settings.timezone);
+      const now = withChatHoliday(localParts(settings.timezone), settings);
       const spec = now.isWeekend ? settings.weekendTime : settings.weekdayTime;
       const target = targetMinute(chatId, now.date, spec);
 

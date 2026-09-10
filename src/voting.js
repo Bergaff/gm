@@ -17,6 +17,13 @@ import {
   changeModelsText,
   captionStylesKeyboard,
   captionStylesText,
+  searchFallbackKeyboard,
+  searchFallbackText,
+  testPromptsKeyboard,
+  testPromptsText,
+  sendMorning,
+  morningTestReport,
+  pickPrompt,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -24,6 +31,7 @@ import { isAdmin } from "./config.js";
 import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
+import { localParts, withChatHoliday } from "./scheduler.js";
 
 function shortHash(text) {
   let value = 2166136261;
@@ -92,6 +100,52 @@ export async function handleCallback(query, env) {
     return;
   }
 
+
+  // ── Тест конкретного промпта кнопкой ────────────────────────────────
+  if (data.startsWith("t|")) {
+    const role = await getRole(chatId, userId, env);
+    if (!canEdit(role)) {
+      await answerCallback(query.id, "⛔ Доступно администратору чата", env, true);
+      return;
+    }
+
+    const [, action, kind, rawIndex] = data.split("|");
+    if (action !== "prompt") return;
+
+    const s = await getSettings(chatId, env);
+    const now = withChatHoliday(localParts(s.timezone), s);
+    let prompt;
+    let label;
+
+    if (kind === "auto") {
+      prompt = pickPrompt(s, now.isWeekend);
+      label = "случайный";
+    } else {
+      const list = kind === "weekend" ? s.weekendPrompts : s.weekdayPrompts;
+      const index = Number(rawIndex);
+      prompt = list?.[index];
+      label = `${kind === "weekend" ? "выходные" : "будни"} ${index + 1}`;
+    }
+
+    if (!prompt) {
+      await answerCallback(query.id, "Промпт не найден", env, true);
+      await editMessage(chatId, query.message.message_id, testPromptsText(s), env, testPromptsKeyboard(s));
+      return;
+    }
+
+    await answerCallback(query.id, "Делаю тест", env);
+    const status = await sendMessage(chatId, `⏳ Тестирую промпт: <b>${label}</b>\n\n<i>${escapeHtml(prompt)}</i>`, env);
+    const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: prompt });
+    const finalText = morningTestReport(result);
+    const mid = status?.result?.message_id;
+    if (mid) {
+      const edited = await editMessage(chatId, mid, finalText, env);
+      if (!edited?.ok) await sendMessage(chatId, finalText, env);
+    } else {
+      await sendMessage(chatId, finalText, env);
+    }
+    return;
+  }
 
   // ── /change: владелец меняет модель в ЛЮБОМ чате ────────────────────
   // Права строже обычных: не админ чата, а владелец бота,
@@ -232,6 +286,18 @@ export async function handleCallback(query, env) {
         await patchSettings(chatId, { source: value }, env);
         await editMarkup(chatId, query.message.message_id, sourceKeyboard(value), env);
         await answerCallback(query.id, `Источник: ${value}`, env);
+        return;
+      }
+
+      if (field === "search_fallback") {
+        if (!["nim", "gdrive"].includes(value)) {
+          await answerCallback(query.id, "Неизвестный запасной источник", env, true);
+          return;
+        }
+        const s = await patchSettings(chatId, { searchFallback: value }, env);
+        await editMessage(chatId, query.message.message_id, searchFallbackText(s), env,
+          searchFallbackKeyboard(value));
+        await answerCallback(query.id, value === "gdrive" ? "Запасной: Drive" : "Запасной: ИИ", env);
         return;
       }
 

@@ -11,9 +11,13 @@ export const DEFAULT_SETTINGS = {
 
   gdriveFolder: "",
 
-  // Запрос для поиска картинок через Google/Yandex Images.
-  // Пример: «кот работяга». Используется при source = search.
+  // Запросы для поиска картинок через Yandex/DuckDuckGo Images.
+  // searchQuery — общий запасной, weekday/weekend списки выбираются случайно.
   searchQuery: "доброе утро красивое фото",
+  weekdaySearchQueries: [],
+  weekendSearchQueries: [],
+  // gdrive | nim — какой источник пробовать, если неофициальный поиск не сработал
+  searchFallback: "nim",
 
   // Библиотека промптов. Активный выбирается случайно из списка,
   // отдельно для будней и выходных. Пустой список -> берётся nimPrompt.
@@ -40,7 +44,10 @@ export const DEFAULT_SETTINGS = {
 
   // Дни рождения участников этого чата:
   // { "<userId>": { date: "MM-DD", name, username, setBy, updatedAt } }
-  birthdays: {}, 
+  birthdays: {},
+
+  // Пользовательские праздники этого чата: { "MM-DD": "Название" }
+  holidays: {}, 
 
   // auto | конкретный id провайдера из nim.js
   nimModel: "auto",

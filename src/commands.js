@@ -20,7 +20,7 @@ import {
   getCustomProviders,
 } from "./images/nim.js";
 import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
-import { localParts, parseTimeSpec } from "./scheduler.js";
+import { localParts, parseTimeSpec, withChatHoliday } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
 import {
@@ -183,33 +183,114 @@ export function captionStylesText(settingsOrTraits = []) {
   ].join("\n");
 }
 
-function selectPromptForTest(settings, value, now) {
-  const parts = String(value || "").trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return { prompt: pickPrompt(settings, now.isWeekend), label: "случайный" };
-
-  const kind = ["weekday", "будни", "workday"].includes(parts[0])
-    ? "weekday"
-    : ["weekend", "выходные"].includes(parts[0])
-      ? "weekend"
-      : null;
-
-  const index = Number(kind ? parts[1] : parts[0]);
-  if (!Number.isInteger(index) || index < 1) return { error: "Формат: /test weekday 2 или /test weekend 1" };
-
-  const list = kind === "weekend" ? settings.weekendPrompts : kind === "weekday" ? settings.weekdayPrompts : (now.isWeekend ? settings.weekendPrompts : settings.weekdayPrompts);
-  if (!Array.isArray(list) || !list[index - 1]) {
-    return { error: `Промпта №${index} нет.\n\n${promptListsText(settings)}` };
-  }
-
-  return { prompt: list[index - 1], label: `${kind || (now.isWeekend ? "weekend" : "weekday")} #${index}` };
-}
-
 // Промпт берётся из библиотеки для нужного типа дня.
 // Если список пуст — используется одиночный nimPrompt (обратная совместимость).
 export function pickPrompt(settings, isWeekend) {
   const list = isWeekend ? settings.weekendPrompts : settings.weekdayPrompts;
   if (Array.isArray(list) && list.length) return pick(list);
   return settings.nimPrompt;
+}
+
+export function pickSearchQuery(settings, isWeekend) {
+  const list = isWeekend ? settings.weekendSearchQueries : settings.weekdaySearchQueries;
+  if (Array.isArray(list) && list.length) return pick(list);
+  return settings.searchQuery || settings.nimPrompt;
+}
+
+function searchListsText(settings) {
+  const section = (title, list) => {
+    const items = Array.isArray(list) && list.length
+      ? list.map((q, i) => `${i + 1}. ${q}`).join("\n")
+      : "— пусто, используется общий поисковый запрос";
+    return `${title}\n${items}`;
+  };
+
+  return [
+    section("Поиск — будни:", settings.weekdaySearchQueries || []),
+    "",
+    section("Поиск — выходные:", settings.weekendSearchQueries || []),
+    "",
+    `Общий поисковый запрос:\n${settings.searchQuery || "не задан"}`,
+  ].join("\n");
+}
+
+export function testPromptsText(settings) {
+  return [
+    "🧪 <b>Тест промпта</b>",
+    "",
+    "Выберите промпт кнопкой ниже — бот сразу сделает тестовую отправку именно с ним.",
+    "",
+    `<pre>${escapeHtml(promptListsText(settings))}</pre>`,
+  ].join("\n");
+}
+
+export function testPromptsKeyboard(settings) {
+  const rows = [];
+  const addRows = (kind, title, list) => {
+    if (!Array.isArray(list) || !list.length) return;
+    for (let i = 0; i < list.length; i += 2) {
+      rows.push(list.slice(i, i + 2).map((_, j) => ({
+        text: `🧪 ${title} ${i + j + 1}`,
+        callback_data: `t|prompt|${kind}|${i + j}`,
+      })));
+    }
+  };
+  addRows("weekday", "будни", settings.weekdayPrompts || []);
+  addRows("weekend", "выходные", settings.weekendPrompts || []);
+  rows.push([{ text: "🎲 Случайный промпт", callback_data: "t|prompt|auto|0" }]);
+  rows.push([{ text: "◀️ Назад в меню", callback_data: "nav|menu" }]);
+  return { inline_keyboard: rows };
+}
+
+export function searchFallbackKeyboard(current = "nim") {
+  const mark = (v) => v === current ? "✅ " : "";
+  return {
+    inline_keyboard: [
+      [
+        { text: `${mark("nim")}🤖 Генерация ИИ`, callback_data: "s|search_fallback|nim" },
+        { text: `${mark("gdrive")}📁 Google Drive`, callback_data: "s|search_fallback|gdrive" },
+      ],
+      [{ text: "◀️ Назад в меню", callback_data: "nav|menu" }],
+    ],
+  };
+}
+
+export function searchFallbackText(settings) {
+  return [
+    "🔎 <b>Поисковый запрос подключён</b>",
+    "",
+    `Запасной источник сейчас: <b>${settings.searchFallback === "gdrive" ? "Google Drive" : "Генерация ИИ"}</b>`,
+    "",
+    "⚠️ Yandex/DuckDuckGo используются неофициально и иногда могут не отдать картинку.",
+    "Выберите второй способ, который бот попробует, если поиск сломается:",
+  ].join("\n");
+}
+
+export function morningTestReport(result) {
+  const report = [
+    `Статус: <code>${result.status}</code>`,
+    result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
+    result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
+    result.promptOriginal
+      ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal))}</i>`
+      : null,
+    result.prompt
+      ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt))}</i>`
+      : null,
+    result.styleId
+      ? `Стиль: <b>${escapeHtml(STYLES[result.styleId]?.title || result.styleId)}</b>` +
+        (result.styleRequested && result.styleRequested !== result.styleId
+          ? ` <i>(вместо «${escapeHtml(STYLES[result.styleRequested]?.title || result.styleRequested)}» — промпт просит рисунок)</i>`
+          : "")
+      : null,
+    `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
+    result.captionError
+      ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
+      : null,
+    result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
+  ].filter(Boolean).join("\n");
+
+  return (result.status === "ok" ? "✅ " : "⚠️ ") + report;
 }
 
 function enforcePrompt(prompt) {
@@ -264,7 +345,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   // РАЗНЫЕ промпты — в превью один, в генерации другой.
   const { test = false, forcePrompt = null } = options;
 
-  const now = localParts(settings.timezone);
+  const now = withChatHoliday(localParts(settings.timezone), settings);
   const birthdaysToday = birthdayPeople(settings, now.date);
 
   // Подпись: либо генерирует нейросеть под характер чата, либо готовая фраза.
@@ -316,7 +397,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   const postId = newPostId();
   const folderId = parseFolderId(settings.gdriveFolder);
   const useSearch = settings.source === "search";
-  const searchQuery = String(settings.searchQuery || "").trim();
+  const searchQuery = String(pickSearchQuery(settings, now.isWeekend) || "").trim();
 
   let useNim = settings.source === "nim";
   if (settings.source === "mixed") {
@@ -395,6 +476,48 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     error = "Источник картинок не настроен";
   }
 
+  async function tryGeneratedFallback() {
+    let fallbackPrompt = rawPrompt;
+    let fallbackNegative = "";
+    let fallbackPromptError = null;
+
+    if (needsTranslation(rawPrompt)) {
+      const tr = await translatePrompt(rawPrompt, env);
+      fallbackPrompt = tr.text;
+      if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
+    }
+
+    if (fallbackPromptError) {
+      attempts.push({ provider: "prompt", ok: false, status: 0, latency: 0, error: fallbackPromptError });
+      return null;
+    }
+
+    fallbackNegative = addSafetyNegative(negativeFor(settings.imageStyle, fallbackPrompt));
+    fallbackPrompt = enforcePrompt(applyStyle(fallbackPrompt, settings.imageStyle));
+    const result = await generateImage(fallbackPrompt, env, {
+      preferred: settings.nimModel,
+      chatId,
+      negative: fallbackNegative,
+    });
+    attempts = attempts.concat(result.attempts || []);
+    if (result.ok) {
+      activePrompt = fallbackPrompt;
+      negative = fallbackNegative;
+      return result;
+    }
+    return null;
+  }
+
+  async function tryDriveFallback() {
+    if (!folderId) return null;
+    try {
+      return await getGdriveImage(chatId, folderId, env, settings.avoidRepeatLast);
+    } catch (e) {
+      error = `${error}; fallback Drive: ${e}`;
+      return null;
+    }
+  }
+
   // --- запасной источник ---
   if (!image) {
     if (useNim && folderId) {
@@ -411,44 +534,10 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       }
     } else if (useSearch) {
       // Поиск — неофициальный источник. Если он не отдал картинку,
-      // обязательно пробуем второй способ: сначала Drive, потом генерацию.
-      if (folderId) {
-        try {
-          image = await getGdriveImage(chatId, folderId, env, settings.avoidRepeatLast);
-        } catch (e) {
-          error = `${error}; fallback Drive: ${e}`;
-        }
-      }
-
-      if (!image) {
-        let fallbackPrompt = rawPrompt;
-        let fallbackNegative = "";
-        let fallbackPromptError = null;
-
-        if (needsTranslation(rawPrompt)) {
-          const tr = await translatePrompt(rawPrompt, env);
-          fallbackPrompt = tr.text;
-          if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
-        }
-
-        if (!fallbackPromptError) {
-          fallbackNegative = addSafetyNegative(negativeFor(settings.imageStyle, fallbackPrompt));
-          fallbackPrompt = enforcePrompt(applyStyle(fallbackPrompt, settings.imageStyle));
-          const result = await generateImage(fallbackPrompt, env, {
-            preferred: settings.nimModel,
-            chatId,
-            negative: fallbackNegative,
-          });
-          attempts = attempts.concat(result.attempts || []);
-          if (result.ok) {
-            image = result;
-            activePrompt = fallbackPrompt;
-            negative = fallbackNegative;
-          }
-        } else {
-          attempts.push({ provider: "prompt", ok: false, status: 0, latency: 0, error: fallbackPromptError });
-        }
-      }
+      // пробуем запасной источник, который выбрали в настройках поиска.
+      const fallback = settings.searchFallback === "gdrive" ? "gdrive" : "nim";
+      image = fallback === "gdrive" ? await tryDriveFallback() : await tryGeneratedFallback();
+      if (!image) image = fallback === "gdrive" ? await tryGeneratedFallback() : await tryDriveFallback();
     } else if (!useNim && !useSearch) {
       // Fallback из Drive в генерацию: готовим промпт так же строго, как
       // для основного NIM-источника, включая перевод. Не отправляем кириллицу
@@ -717,9 +806,11 @@ export function changeModelsText(env, title, current) {
 const KNOWN_COMMANDS = new Set([
   "/start", "/help", "/settings", "/id",
   "/set_source", "/set_gdrive", "/refresh_gdrive", "/set_search",
+  "/searches", "/add_search", "/del_search",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
   "/models", "/set_model", "/set_timezone", "/style", "/caption_style",
   "/birthday", "/birthdays", "/birthday_remove",
+  "/holiday", "/holidays", "/holiday_remove",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
   "/test", "/reset", "/cancel", "/diag", "/menu",
@@ -741,6 +832,8 @@ const PENDING_PROMPTS = {
     "или генерацию ИИ (/set_source nim).\n\n" +
     "<i>/cancel — отмена</i>",
   set_caption_traits: "Пришлите короткие характеристики чата, каждую с новой строки.\n\n<i>Например:</i>\n<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n<i>/cancel — отмена</i>",
+  add_search_weekday: "Пришлите поисковый запрос для <b>будней</b>.\n\n<i>Пример: кот работяга</i>\n<i>/cancel — отмена</i>",
+  add_search_weekend: "Пришлите поисковый запрос для <b>выходных</b>.\n\n<i>Пример: кот отдыхает с кофе</i>\n<i>/cancel — отмена</i>",
   add_prompt_weekday: "Пришлите текст промпта для <b>будней</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>.\n\n<i>/cancel — отмена</i>",
@@ -1045,6 +1138,16 @@ export async function handleCommand(message, env, options = {}) {
     return;
   }
 
+  // ── Пользовательские праздники чата ─────────────────────────────────
+  if (command === "/holiday" || command === "/holiday_remove" || command === "/holidays") {
+    if (!canEdit(role)) {
+      await sendMessage(chatId, "⛔ Праздники чата может менять администратор чата или участник с выданным доступом.", env);
+      return;
+    }
+    await handleHolidayCommand(command, value, chatId, env);
+    return;
+  }
+
   // ── Статистика: только владельцы бота ────────────────────────────────
   if (
     command.startsWith("/stats") ||
@@ -1254,6 +1357,41 @@ export async function handleCommand(message, env, options = {}) {
         return;
       }
       await applySearchQuery(value, chatId, env);
+      return;
+    }
+
+    case "/searches": {
+      const s = await getSettings(chatId, env);
+      await sendMessage(chatId, `<pre>${escapeHtml(searchListsText(s))}</pre>`, env);
+      return;
+    }
+
+    case "/add_search": {
+      const parts = value.split(/\s+/);
+      const kind = parts[0] === "weekend" ? "weekend" : parts[0] === "weekday" ? "weekday" : null;
+      const body = kind ? parts.slice(1).join(" ").trim() : value;
+      if (!kind) {
+        await sendMessage(chatId, "Куда добавить запрос?\n\n<code>/add_search weekday кот работяга</code>\n<code>/add_search weekend кот отдыхает с кофе</code>", env);
+        return;
+      }
+      if (!body) {
+        await setPending(chatId, userId, `add_search_${kind}`, env);
+        await sendMessage(chatId, PENDING_PROMPTS[`add_search_${kind}`], env);
+        return;
+      }
+      await addSearchQuery(kind, body, chatId, env);
+      return;
+    }
+
+    case "/del_search": {
+      const parts = value.split(/\s+/);
+      const kind = parts[0] === "weekend" ? "weekend" : "weekday";
+      const num = Number(parts[1]);
+      if (!num) {
+        await sendMessage(chatId, "Использование: <code>/del_search weekday 2</code> или <code>/del_search weekend 1</code>\n\nСписок: /searches", env);
+        return;
+      }
+      await deleteSearchQuery(kind, num - 1, chatId, env);
       return;
     }
 
@@ -1580,87 +1718,17 @@ export async function handleCommand(message, env, options = {}) {
 
     case "/test": {
       const s = await getSettings(chatId, env);
-
-      const willUseNim =
-        s.source === "nim" || (s.source === "mixed" && true);
-      const willUseSearch = s.source === "search";
-      // Выбираем промпт ОДИН раз и передаём в sendMorning,
-      // иначе показ и генерация разойдутся. Можно выбрать конкретный:
-      // /test weekday 2 или /test weekend 1.
-      if (["list", "all", "все"].includes(value.toLowerCase())) {
-        await sendMessage(chatId, `<pre>${escapeHtml(promptListsText(s))}</pre>`, env);
+      if (value) {
+        await sendMessage(
+          chatId,
+          "Теперь тест выбирается кнопками. Отправьте <code>/test</code> — я покажу список будних и выходных промптов и кнопки для проверки.",
+          env
+        );
         return;
       }
-      const nowForTest = localParts(s.timezone);
-      const selected = selectPromptForTest(s, value, nowForTest);
-      if (selected.error) {
-        await sendMessage(chatId, `❌ ${escapeHtml(selected.error)}`, env);
-        return;
-      }
-      const preview = selected.prompt;
-
-      // Одно служебное сообщение на весь тест: сначала «Готовлю…»,
-      // потом ЭТО ЖЕ сообщение редактируется в итоговый отчёт.
-      // Раньше слались два отдельных и засоряли чат.
-      const statusMsg = await sendMessage(
-        chatId,
-        [
-          "⏳ Готовлю…",
-          "",
-          `Источник: <b>${s.source}</b>`,
-          `Промпт теста: <b>${escapeHtml(selected.label)}</b>`,
-          willUseNim
-            ? `Промпт: <i>${escapeHtml(String(preview))}</i>` +
-              (needsTranslation(preview) ? "\n<i>(переведу на английский)</i>" : "")
-            : willUseSearch
-              ? `Поиск: <i>${escapeHtml(s.searchQuery || preview)}</i>`
-              : "Картинка: случайная из Google Drive",
-          `Подпись: ${s.aiCaptions ? "🤖 нейросеть" : "📄 готовая фраза"}`,
-          !s.aiCaptions && s.character
-            ? "⚠️ <b>Характер задан, но подписи выключены!</b> Включить: /ai_on"
-            : null,
-        ].join("\n"),
-        env
-      );
-
-      const statusId = statusMsg?.result?.message_id || null;
-
-      const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: preview });
-
-      // Показываем, что реально сработало — видно, откуда взялись текст и картинка.
-      const report = [
-        `Статус: <code>${result.status}</code>`,
-        result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
-        result.assetName ? `Файл: <code>${escapeHtml(result.assetName)}</code>` : null,
-        result.promptOriginal
-          ? `Промпт (RU): <i>${escapeHtml(String(result.promptOriginal))}</i>`
-          : null,
-        result.prompt
-          ? `Промпт${result.promptTranslated ? " (EN, переведён)" : ""}: <i>${escapeHtml(String(result.prompt))}</i>`
-          : null,
-        result.styleId
-          ? `Стиль: <b>${escapeHtml(STYLES[result.styleId]?.title || result.styleId)}</b>` +
-            (result.styleRequested && result.styleRequested !== result.styleId
-              ? ` <i>(вместо «${escapeHtml(STYLES[result.styleRequested]?.title || result.styleRequested)}» — промпт просит рисунок)</i>`
-              : "")
-          : null,
-        `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
-        result.captionError
-          ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
-          : null,
-        result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
-      ].filter(Boolean).join("\n");
-
-      const finalText = (result.status === "ok" ? "✅ " : "⚠️ ") + report;
-
-      // Редактируем то же сообщение. Если не вышло (например, его удалили) —
-      // отправляем новое, чтобы отчёт не потерялся.
-      if (statusId) {
-        const edited = await editMessage(chatId, statusId, finalText, env);
-        if (!edited?.ok) await sendMessage(chatId, finalText, env);
-      } else {
-        await sendMessage(chatId, finalText, env);
-      }
+      await sendMessage(chatId, testPromptsText(s), env, {
+        reply_markup: testPromptsKeyboard(s),
+      });
       return;
     }
 
@@ -1694,6 +1762,12 @@ async function applyPendingValue(pending, text, chatId, env) {
 
     case "set_caption_traits":
       return applyCaptionTraits(text, chatId, env);
+
+    case "add_search_weekday":
+      return addSearchQuery("weekday", text, chatId, env);
+
+    case "add_search_weekend":
+      return addSearchQuery("weekend", text, chatId, env);
 
     case "add_prompt_weekday":
       return addPrompt("weekday", text, chatId, env);
@@ -1732,6 +1806,38 @@ async function applyPendingValue(pending, text, chatId, env) {
   }
 }
 
+async function addSearchQuery(kind, textValue, chatId, env) {
+  const query = String(textValue || "").trim().replace(/\s+/g, " ").slice(0, 120);
+  if (query.length < 2) {
+    await sendMessage(chatId, "❌ Запрос слишком короткий. Пример: <code>/add_search weekday кот работяга</code>", env);
+    return;
+  }
+
+  const s = await getSettings(chatId, env);
+  const field = kind === "weekend" ? "weekendSearchQueries" : "weekdaySearchQueries";
+  const list = [...(s[field] || [])];
+  if (list.length >= 20) {
+    await sendMessage(chatId, "Достигнут лимит в 20 поисковых запросов. Удалите лишние через /del_search", env);
+    return;
+  }
+  list.push(query);
+  await patchSettings(chatId, { [field]: list, source: "search" }, env);
+  await sendMessage(chatId, `✅ Поисковый запрос добавлен в список ${kind === "weekend" ? "выходных" : "будней"}: <code>${escapeHtml(query)}</code>\n\nСписок: /searches`, env);
+}
+
+async function deleteSearchQuery(kind, index, chatId, env) {
+  const s = await getSettings(chatId, env);
+  const field = kind === "weekend" ? "weekendSearchQueries" : "weekdaySearchQueries";
+  const list = [...(s[field] || [])];
+  if (index < 0 || index >= list.length) {
+    await sendMessage(chatId, "Нет поискового запроса с таким номером. Список: /searches", env);
+    return;
+  }
+  const [removed] = list.splice(index, 1);
+  await patchSettings(chatId, { [field]: list }, env);
+  await sendMessage(chatId, `🗑 Удалён поисковый запрос: <code>${escapeHtml(removed)}</code>`, env);
+}
+
 async function applyCaptionTraits(text, chatId, env) {
   const traits = parseCaptionTraits(text);
   if (!traits.length) {
@@ -1747,6 +1853,51 @@ async function applyCaptionTraits(text, chatId, env) {
       "\n\n🤖 AI-подписи включены. Проверить: /test",
     env
   );
+}
+
+async function handleHolidayCommand(command, value, chatId, env) {
+  const s = await getSettings(chatId, env);
+  const holidays = { ...(s.holidays || {}) };
+
+  if (command === "/holidays") {
+    const list = Object.entries(holidays).sort((a, b) => a[0].localeCompare(b[0]));
+    if (!list.length) {
+      await sendMessage(chatId, "🎉 Свои праздники чата пока не заданы.\n\nДобавить: <code>/holiday 31.12 Предновогодний день</code>\nУдалить: <code>/holiday_remove 31.12</code>", env);
+      return;
+    }
+    await sendMessage(
+      chatId,
+      "🎉 <b>Праздники этого чата</b>\n\n" +
+        list.map(([date, name]) => `• <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)}`).join("\n"),
+      env
+    );
+    return;
+  }
+
+  if (command === "/holiday_remove") {
+    const date = parseBirthdayDate(value);
+    if (!date) {
+      await sendMessage(chatId, "Использование: <code>/holiday_remove 31.12</code>\n\nСписок: /holidays", env);
+      return;
+    }
+    const old = holidays[date];
+    delete holidays[date];
+    await patchSettings(chatId, { holidays }, env);
+    await sendMessage(chatId, old ? `🗑 Праздник ${formatBirthdayDate(date)} удалён.` : "Такого праздника не было.", env);
+    return;
+  }
+
+  const parts = value.split(/\s+/);
+  const date = parseBirthdayDate(parts[0]);
+  const name = parts.slice(1).join(" ").trim().slice(0, 80);
+  if (!date || !name) {
+    await sendMessage(chatId, "Использование: <code>/holiday 31.12 Предновогодний день</code>\n\nВ этот день бот будет считать расписание выходным и учитывать праздник в подписи.", env);
+    return;
+  }
+
+  holidays[date] = name;
+  await patchSettings(chatId, { holidays }, env);
+  await sendMessage(chatId, `✅ Праздник добавлен: <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)}. В этот день будет использоваться время выходного дня.`, env);
 }
 
 async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
@@ -1925,10 +2076,9 @@ async function applySearchQuery(value, chatId, env) {
       `Запрос: <code>${escapeHtml(query)}</code>\n\n` +
       "Буду брать каждый раз новую картинку без повторов из выдачи. " +
       "18+ фильтр включён на стороне поиска и дополнительно проверяется по результатам.\n\n" +
-      "⚠️ Поиск неофициальный, поэтому настройте второй способ на случай сбоя: " +
-      "папку /set_gdrive или генерацию /set_source nim. Если второй способ уже есть — всё нормально.\n\n" +
-      "Проверить: /test",
-    env
+      "⚠️ Поиск неофициальный, поэтому выберите второй способ на случай сбоя.",
+    env,
+    { reply_markup: searchFallbackKeyboard((await getSettings(chatId, env)).searchFallback || "nim") }
   );
 }
 
@@ -2100,7 +2250,10 @@ function helpText(role) {
     "/set_source — источник картинок (кнопки)",
     "/set_gdrive — папка Google Drive",
     "/refresh_gdrive — обновить список файлов",
-    "/set_search &lt;запрос&gt; — брать картинки из Google/Yandex Images",
+    "/set_search &lt;запрос&gt; — общий поисковый запрос",
+    "/searches — списки поисковых запросов",
+    "/add_search weekday|weekend &lt;запрос&gt;",
+    "/del_search weekday|weekend &lt;номер&gt;",
     "",
     "<b>Промпты</b>",
     "/prompts — список для будней (кнопки)",
@@ -2128,12 +2281,17 @@ function helpText(role) {
     "/birthdays — список",
     "/birthday_remove — удалить свой или reply-цель",
     "",
+    "<b>Праздники чата</b>",
+    "/holiday 31.12 Название — добавить праздник",
+    "/holidays — список праздников чата",
+    "/holiday_remove 31.12 — удалить праздник",
+    "",
     "<b>Прочее</b>",
     "/voting_on, /voting_off",
     "/enable, /disable — или кнопка в /menu",
-    "/test — отправить прямо сейчас",
-    "/test weekday 2 или /test weekend 1 — проверить конкретный промпт",
-    "/test list — показать будние и выходные промпты сразу",
+    "/test — список промптов с кнопками для теста",
+    "/enable — включить утреннюю рассылку",
+    "/disable — отключить бота в этом чате, не удаляя его",
     "/reset — сброс настроек чата",
     "/id — узнать ID чата и свой",
     "/diag — проверить, что настроено и что сломано",
@@ -2174,31 +2332,50 @@ export function settingsTextPublic(s, chatId, role) {
 function settingsText(s, chatId, role) {
   const wd = (s.weekdayPrompts || []).length;
   const we = (s.weekendPrompts || []).length;
+  const swd = (s.weekdaySearchQueries || []).length;
+  const swe = (s.weekendSearchQueries || []).length;
+  const fallback = s.searchFallback === "gdrive" ? "Google Drive" : "генерация ИИ";
 
   return [
     "⚙️ <b>Настройки этого чата</b>",
     `<i>chat_id: <code>${chatId}</code></i>`,
     "",
-    `Рассылка: <b>${s.enabled ? "включена" : "выключена"}</b>`,
-    `Источник: <b>${s.source}</b>`,
+    "<b>Состояние</b>",
+    `Рассылка: <b>${s.enabled ? "включена ✅" : "выключена ⛔"}</b>` +
+      (s.enabled ? "" : " — бот в чате, но по расписанию не пишет"),
+    `Голосование: <b>${s.votingEnabled ? "включено" : "выключено"}</b>`,
+    "",
+    "<b>Картинки</b>",
+    `Источник: <b>${s.source}</b> ` +
+      (s.source === "gdrive" ? "(Google Drive)" :
+       s.source === "nim" ? "(генерация ИИ)" :
+       s.source === "search" ? "(поисковый запрос)" : "(Drive + генерация)"),
     `Google Drive: ${s.gdriveFolder ? "подключён ✅" : "не задан ❌"}`,
-    `Поиск: <code>${escapeHtml(s.searchQuery || "не задан")}</code>`,
-    `Модель NIM: <b>${s.nimModel}</b>`,
+    `Поиск общий: <code>${escapeHtml(s.searchQuery || "не задан")}</code>`,
+    `Поиск будни/выходные: <b>${swd}</b> / <b>${swe}</b> запросов`,
+    `Запасной источник для поиска: <b>${fallback}</b>`,
+    `Модель генерации: <b>${s.nimModel}</b>`,
     `Стиль картинки: <b>${getStyle(s.imageStyle).title}</b>`,
-    `Характеристики подписей: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`,
     "",
-    `Промпты будней: <b>${wd || "—"}</b>`,
-    `Промпты выходных: <b>${we || "—"}</b>`,
-    wd || we ? "" : `Общий промпт: <i>${escapeHtml(String(s.nimPrompt).slice(0, 120))}</i>`,
+    "<b>Промпты генерации</b>",
+    `Будни: <b>${wd || "—"}</b>`,
+    `Выходные: <b>${we || "—"}</b>`,
+    `Общий запасной: <i>${escapeHtml(String(s.nimPrompt).slice(0, 160))}</i>`,
     "",
+    "<b>Подписи</b>",
+    `AI-подписи: <b>${s.aiCaptions ? "включены 🤖" : "выключены"}</b>`,
+    `Характер чата: <b>${s.character ? `${s.character.length} симв.` : "не задан"}</b>`,
+    `Короткие характеристики: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`,
+    "",
+    "<b>Расписание и даты</b>",
     `Часовой пояс: <b>${s.timezone}</b>`,
     `Будни: <b>${s.weekdayTime}</b>`,
-    `Выходные: <b>${s.weekendTime}</b>`,
-    `Голосование: <b>${s.votingEnabled ? "да" : "нет"}</b>`,
+    `Выходные/праздники: <b>${s.weekendTime}</b>`,
     `Дни рождения: <b>${Object.keys(s.birthdays || {}).length}</b>`,
+    `Свои праздники чата: <b>${Object.keys(s.holidays || {}).length}</b>`,
     "",
     `Ваша роль: <b>${roleLabel(role)}</b>`,
     "",
-    "<i>Настройки индивидуальны для каждого чата.</i>",
+    "<i>Настройки индивидуальны для каждого чата. Открыть кнопки: /menu</i>",
   ].filter((line) => line !== null).join("\n");
 }

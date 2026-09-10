@@ -15,7 +15,9 @@ const TIMEOUT_MS = 12000; // укладываемся в лимит waitUntil (3
 // Together, DeepSeek, OpenRouter, Mistral, LM Studio, Ollama и другие.
 // Достаточно поменять URL + ключ + модель.
 const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const DEFAULT_LLM_MODEL = "meta/llama-3.3-70b-instruct";
+// meta/llama-3.3-70b-instruct умер 2026-08-26 и теперь отдаёт 410 Gone.
+// Новый безопасный дефолт для NVIDIA integrate.api.nvidia.com.
+const DEFAULT_LLM_MODEL = "qwen/qwen3-next-80b-a3b-instruct";
 const DEFAULT_GEMINI_TEXT_MODEL = "gemini-2.5-flash";
 
 function normalizeTraits(traits) {
@@ -431,6 +433,7 @@ export async function generateCaption(env, options = {}) {
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
+  const textModels = [...new Set([model, DEFAULT_LLM_MODEL, "qwen/qwq-32b"].filter(Boolean))];
   const started = Date.now();
   const messages = buildPrompt(
     character,
@@ -498,64 +501,69 @@ export async function generateCaption(env, options = {}) {
     return { ok: false, error: "нет ключа для текста (TEXT_API_KEY) и не включён binding [ai]" };
   }
 
-  for (let i = 0; i < Math.min(keys.length, 2); i++) {
-    try {
-      const response = await fetch(getTextUrl(env), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${keys[i]}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.7,
-          top_p: 0.9,
-          // presence_penalty гонит модель от заезженных формулировок
-          presence_penalty: 0.6,
-          frequency_penalty: 0.3,
-          // см. комментарий про кириллицу выше
-          max_tokens: 500,
-        }),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+  for (const currentModel of textModels) {
+    for (let i = 0; i < Math.min(keys.length, 2); i++) {
+      try {
+        const response = await fetch(getTextUrl(env), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${keys[i]}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            model: currentModel,
+            messages,
+            temperature: 0.7,
+            top_p: 0.9,
+            // presence_penalty гонит модель от заезженных формулировок
+            presence_penalty: 0.6,
+            frequency_penalty: 0.3,
+            // см. комментарий про кириллицу выше
+            max_tokens: 500,
+          }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
 
-      if (!response.ok) {
-        const body = await response.text();
-        lastError = `LLM ${response.status}: ${body.slice(0, 150)}`;
-        // 401/403/429 — пробуем следующий ключ
-        if ([401, 403, 429].includes(response.status) && i + 1 < keys.length) continue;
-        // Любая другая ошибка (402 «кончились кредиты», 5xx) — выходим из цикла
-        // и пробуем бесплатный Workers AI ниже, а не сдаёмся сразу.
-        break;
+        if (!response.ok) {
+          const body = await response.text();
+          lastError = `LLM ${response.status} (${currentModel}): ${body.slice(0, 150)}`;
+          // 410 Gone — модель снята с обслуживания: пробуем следующий model id.
+          if (response.status === 410) break;
+          // 401/403/429 — пробуем следующий ключ
+          if ([401, 403, 429].includes(response.status) && i + 1 < keys.length) continue;
+          // Любая другая ошибка (402 «кончились кредиты», 5xx) — выходим из цикла
+          // и пробуем следующую модель / бесплатный Workers AI ниже.
+          break;
+        }
+
+        const data = await response.json();
+        const raw = data?.choices?.[0]?.message?.content;
+        const text = cleanup(raw);
+
+        if (!text) {
+          lastError = `пустой ответ модели ${currentModel}`;
+          continue;
+        }
+
+        // Модель могла сползти на другой язык — тогда пробуем следующий
+        // ключ/модель, а не отдаём в чат текст с иероглифами.
+        const problem = captionProblem(text);
+        if (problem) {
+          lastError = `модель ${currentModel} выдала брак (${problem})`;
+          continue;
+        }
+
+        return {
+          ok: true,
+          text,
+          model: currentModel,
+          latency: Date.now() - started,
+        };
+      } catch (e) {
+        lastError = String(e).slice(0, 150);
+        if (i + 1 >= keys.length) break;
       }
-
-      const data = await response.json();
-      const raw = data?.choices?.[0]?.message?.content;
-      const text = cleanup(raw);
-
-      if (!text) {
-        return { ok: false, error: "пустой ответ модели", latency: Date.now() - started };
-      }
-
-      // Модель могла сползти на другой язык — тогда пробуем следующий
-      // ключ, а не отдаём в чат текст с иероглифами.
-      const problem = captionProblem(text);
-      if (problem) {
-        lastError = `модель выдала брак (${problem})`;
-        continue;
-      }
-
-      return {
-        ok: true,
-        text,
-        model,
-        latency: Date.now() - started,
-      };
-    } catch (e) {
-      lastError = String(e).slice(0, 150);
-      if (i + 1 >= keys.length) break;
     }
   }
 

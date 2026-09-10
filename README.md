@@ -32,7 +32,7 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `NVIDIA_API_KEY`
 - `GEMINI_API_KEY` — опционально, Gemini 2.5 Flash Image и Gemini 2.5 Flash для более живых текстов
 - `GEMINI_TEXT_MODEL` — опционально, по умолчанию `gemini-2.5-flash`
-- `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов
+- `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов; для NVIDIA старый `meta/llama-3.3-70b-instruct` замените на `qwen/qwen3-next-80b-a3b-instruct`
 - `PIXABAY_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pixabay)
 - `PEXELS_API_KEY` — опционально для источника `search` (бесплатные стоковые фото Pexels)
 - `SERPER_API_KEY` — опционально для источника `search` (Google Images через Serper, trial credits)
