@@ -328,7 +328,7 @@ export function morningTestReport(result) {
           ? ` <i>(вместо «${escapeHtml(STYLES[result.styleRequested]?.title || result.styleRequested)}» — промпт просит рисунок)</i>`
           : "")
       : null,
-    `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
+    `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : result.captionSource === "example" ? "📚 из примеров" : "📄 шаблон"}`,
     result.captionModel ? `Модель текста: <b>${escapeHtml(result.captionModel)}</b>` : null,
     result.captionError
       ? `⚠️ AI-подпись: ${escapeHtml(captionPublicError)}`
@@ -436,9 +436,21 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       captionSource = "llm";
       captionModel = generated.model || null;
     } else {
-      // Раньше сбой глотался молча, и было непонятно, почему подписи
-      // остаются шаблонными. Теперь причина видна в /test.
-      captionError = generated.error || "неизвестная ошибка";
+      // Крайний запасной вариант: если LLM не ответил, берём случайный
+      // удачный пример из библиотеки. Это лучше, чем сухой дефолтный шаблон,
+      // и не показывает чату технические ошибки API.
+      const fallbackExample = pickExamples(allExamples, 1)[0];
+      if (fallbackExample) {
+        text = fallbackExample;
+        if (birthdaysToday.length) text = `${text}\n\n${birthdayLine(birthdaysToday)}`;
+        captionSource = "example";
+        captionModel = null;
+        captionError = null;
+      } else {
+        // Раньше сбой глотался молча, и было непонятно, почему подписи
+        // остаются шаблонными. Теперь причина видна в /test.
+        captionError = generated.error || "неизвестная ошибка";
+      }
     }
   }
 

@@ -725,6 +725,50 @@ export async function generateCaption(env, options = {}) {
 
 const TRANSLATE_TIMEOUT_MS = 8000;
 
+const RU_VISUAL_WORDS = {
+  "кот": "cat", "кота": "cat", "коту": "cat", "котик": "cat", "котики": "cats", "кошка": "cat", "кошки": "cats",
+  "собака": "dog", "пёс": "dog", "пес": "dog", "щенок": "puppy",
+  "работа": "work", "работе": "work", "работает": "working", "работающий": "working", "работяга": "hard worker",
+  "офис": "office", "офисе": "office", "завод": "factory", "заводе": "factory", "коллеги": "coworkers",
+  "утро": "morning", "доброе": "good", "рассвет": "sunrise", "солнце": "sun", "кофе": "coffee", "чай": "tea",
+  "обед": "lunch", "перерыв": "break", "отдых": "rest", "отдыхает": "resting", "спит": "sleeping", "сон": "sleep",
+  "стол": "desk", "компьютер": "computer", "ноутбук": "laptop", "чертеж": "technical drawing", "чертежи": "technical drawings",
+  "смешной": "funny", "мем": "meme", "мемный": "meme-like", "милый": "cute", "уютный": "cozy", "красивый": "beautiful",
+  "мужчина": "man", "женщина": "woman", "человек": "person", "люди": "people",
+  "город": "city", "улица": "street", "дом": "home", "комната": "room", "кухня": "kitchen",
+  "пятница": "Friday", "четверг": "Thursday", "понедельник": "Monday", "выходные": "weekend", "будни": "workday",
+};
+
+function transliterateRu(text) {
+  const map = {
+    а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y",
+    к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u",
+    ф: "f", х: "h", ц: "ts", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya",
+  };
+  return String(text || "").toLowerCase().replace(/[а-яё]/g, (ch) => map[ch] ?? ch);
+}
+
+function emergencyTranslatePrompt(original) {
+  const words = String(original || "").toLowerCase().match(/[a-zа-яё0-9-]+/giu) || [];
+  const translated = [];
+  for (const word of words) {
+    const clean = word.replace(/^[-\d]+|[-\d]+$/g, "");
+    if (!clean) continue;
+    if (/^[a-z0-9-]+$/i.test(clean)) translated.push(clean);
+    else if (RU_VISUAL_WORDS[clean]) translated.push(RU_VISUAL_WORDS[clean]);
+  }
+
+  const core = [...new Set(translated)].slice(0, 24).join(", ");
+  const translit = transliterateRu(original).replace(/[^a-z0-9, .'-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+
+  return [
+    "safe for work good morning image",
+    core || "funny cozy workday morning scene",
+    translit ? `visual idea transliterated: ${translit}` : "",
+    "simple focused composition, no readable text, no watermark, no logo",
+  ].filter(Boolean).join(", ");
+}
+
 // Есть ли в тексте кириллица (быстрая проверка, без запросов)
 export function needsTranslation(text) {
   return /[\u0400-\u04FF]/.test(String(text || ""));
@@ -793,7 +837,10 @@ export async function translatePrompt(prompt, env) {
   const preferCf = env.AI && String(env.PREFER_EXTERNAL_TEXT || "") !== "1";
 
   if (preferCf || !keys.length) {
-    if (!env.AI) return { text: original, translated: false, error: "нет ключа для перевода" };
+    if (!env.AI) {
+      const emergency = emergencyTranslatePrompt(original);
+      return { text: emergency, translated: true, cached: false, provider: "local", fallback: true, error: "нет ключа для перевода" };
+    }
     try {// молча возвращаем оригинал ниже
       const out = await env.AI.run(CF_TEXT_MODEL, {
         messages: [
@@ -812,7 +859,8 @@ export async function translatePrompt(prompt, env) {
       // не вышло — если есть внешние ключи, пробуем их ниже
     }
     if (!keys.length) {
-      return { text: original, translated: false, error: "Workers AI не перевёл" };
+      const emergency = emergencyTranslatePrompt(original);
+      return { text: emergency, translated: true, cached: false, provider: "local", fallback: true, error: "Workers AI не перевёл" };
     }
   }
 
@@ -889,6 +937,15 @@ export async function translatePrompt(prompt, env) {
         if (i + 1 >= keys.length) break;
       }
     }
+  }
+
+  // Последний локальный fallback без внешних API. Он не идеален, но гарантирует,
+  // что русский промпт не заблокирует генерацию полностью: генератор получит
+  // английское безопасное описание вместо сырой кириллицы.
+  const emergency = emergencyTranslatePrompt(original);
+  if (emergency && !needsTranslation(emergency)) {
+    try { await env.BOT_KV.put(key, emergency, { expirationTtl: 24 * 60 * 60 }); } catch {}
+    return { text: emergency, translated: true, cached: false, provider: "local", fallback: true, error: lastError };
   }
 
   return { text: original, translated: false, error: lastError };
