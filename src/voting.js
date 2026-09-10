@@ -272,13 +272,15 @@ export async function handleCallback(query, env) {
           await patchSettings(chatId, { source: "search" }, env);
           await editMarkup(chatId, query.message.message_id, sourceKeyboard("search"), env);
           await answerCallback(query.id, "Жду поисковый запрос", env);
+          const s = await getSettings(chatId, env);
           await sendMessage(
             chatId,
             "🔎 Пришлите поисковый запрос для картинок.\n\n" +
               "<i>Пример: кот работяга</i>\n\n" +
               "⚠️ Поиск неофициальный и может иногда не сработать. " +
-              "Лучше дополнительно настроить запасной источник: /set_gdrive или генерацию ИИ.",
-            env
+              "Сразу выберите второй способ, который бот попробует при сбое поиска:",
+            env,
+            { reply_markup: searchFallbackKeyboard(s.searchFallback || "nim") }
           );
           return;
         }

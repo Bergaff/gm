@@ -1321,9 +1321,11 @@ export async function handleCommand(message, env, options = {}) {
         return;
       }
       if (value === "search") {
-        await patchSettings(chatId, { source: "search" }, env);
+        const s = await patchSettings(chatId, { source: "search" }, env);
         await setPending(chatId, userId, "set_search", env);
-        await sendMessage(chatId, PENDING_PROMPTS.set_search, env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_search, env, {
+          reply_markup: searchFallbackKeyboard(s.searchFallback || "nim"),
+        });
         return;
       }
       await patchSettings(chatId, { source: value }, env);
@@ -1629,7 +1631,7 @@ export async function handleCommand(message, env, options = {}) {
         await sendMessage(
           chatId,
           "Использование: <code>/set_text_provider gemini|auto|external|cf</code>\n\n" +
-            "<b>gemini</b> — сейчас рекомендовано: текст через Gemini, fallback только Cloudflare.\n" +
+            "<b>gemini</b> — сейчас рекомендовано: текст строго через Gemini, без NVIDIA/Cloudflare fallback.\n" +
             "<b>auto</b> — Gemini → внешний API → Cloudflare.\n" +
             "<b>external</b> — TEXT_API_URL/TEXT_API_KEY/TEXT_API_MODEL.\n" +
             "<b>cf</b> — Cloudflare Workers AI.",
@@ -2110,7 +2112,7 @@ async function applySearchQuery(value, chatId, env) {
       `Запрос: <code>${escapeHtml(query)}</code>\n\n` +
       "Буду брать каждый раз новую картинку без повторов из выдачи. " +
       "18+ фильтр включён на стороне поиска и дополнительно проверяется по результатам.\n\n" +
-      "⚠️ Поиск неофициальный, поэтому выберите второй способ на случай сбоя.",
+      "⚠️ Поиск неофициальный, поэтому выберите второй способ на случай сбоя кнопкой ниже.", 
     env,
     { reply_markup: searchFallbackKeyboard((await getSettings(chatId, env)).searchFallback || "nim") }
   );

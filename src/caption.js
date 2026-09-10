@@ -43,7 +43,7 @@ function captionTraitsBlock(traits) {
  * Используется, когда нет внешнего ключа или он исчерпан.
  * Те же 10 000 нейронов/сутки, что и на картинки.
  */
-const CF_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const CF_TEXT_MODEL = "@cf/openai/gpt-oss-20b";
 
 export function getGeminiTextModel(env) {
   return String(env.GEMINI_TEXT_MODEL || DEFAULT_GEMINI_TEXT_MODEL).trim().replace(/^models\//, "");
@@ -83,7 +83,10 @@ async function generateViaGemini(env, messages) {
 }
 
 async function generateViaCfBinding(env, messages) {
-  const out = await env.AI.run(String(env.TEXT_API_MODEL || CF_TEXT_MODEL), {
+  // ВАЖНО: TEXT_API_MODEL — это модель для OpenAI-compatible внешнего API.
+  // Для Cloudflare используем отдельную переменную CF_TEXT_MODEL, иначе старые
+  // значения вроде @cf/meta/infire-llama-3.1-8b-instruct ломают fallback.
+  const out = await env.AI.run(String(env.CF_TEXT_MODEL || CF_TEXT_MODEL), {
     messages,
     // temperature 1.0 заставляла llama срываться на английский
     // и китайский посреди русской фразы. 0.7 сохраняет живость.
@@ -475,6 +478,14 @@ export async function generateCaption(env, options = {}) {
     }
   }
 
+  if (mode === "gemini") {
+    return {
+      ok: false,
+      error: geminiError || "выбран Gemini для текста, но GEMINI_API_KEY не задан или Gemini не ответил",
+      latency: Date.now() - started,
+    };
+  }
+
   // Cloudflare можно принудительно оставить первым: PREFER_CF_TEXT=1.
   const preferCf = env.AI && String(env.PREFER_CF_TEXT || "") === "1";
 
@@ -483,7 +494,7 @@ export async function generateCaption(env, options = {}) {
         const text = cleanup(await generateViaCfBinding(env, messages));
         const problem = captionProblem(text);
         if (text && !problem) {
-          return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+          return { ok: true, text, model: "cloudflare/" + String(env.CF_TEXT_MODEL || CF_TEXT_MODEL),
                    latency: Date.now() - started };
         }
         return { ok: false, error: problem
@@ -495,12 +506,12 @@ export async function generateCaption(env, options = {}) {
     // не получилось — идём во внешние ключи ниже
   }
 
-  if (mode === "cf" || mode === "gemini" || !keys.length) {
+  if (mode === "cf" || !keys.length) {
     if (env.AI) {
       try {
         const text = cleanup(await generateViaCfBinding(env, messages));
         if (text) {
-          return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+          return { ok: true, text, model: "cloudflare/" + String(env.CF_TEXT_MODEL || CF_TEXT_MODEL),
                    latency: Date.now() - started };
         }
         return { ok: false, error: "Workers AI вернул пустой ответ" };
@@ -582,7 +593,7 @@ export async function generateCaption(env, options = {}) {
     try {
       const text = cleanup(await generateViaCfBinding(env, messages));
       if (text && !captionProblem(text)) {
-        return { ok: true, text, model: "cloudflare/" + CF_TEXT_MODEL,
+        return { ok: true, text, model: "cloudflare/" + String(env.CF_TEXT_MODEL || CF_TEXT_MODEL),
                  latency: Date.now() - started, fallback: true };
       }
     } catch {
