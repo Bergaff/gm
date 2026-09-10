@@ -2221,9 +2221,8 @@ export async function addPrompt(kind, textValue, chatId, env) {
     return;
   }
 
-  // 1500 символов с запасом. Реальное ограничение — у самих моделей:
-  // CLIP (SDXL, SD3, BRIA) читает только первые ~77 токенов, остальное
-  // молча отбрасывает. FLUX на T5 понимает до 512 токенов.
+  // 1500 символов с запасом: длинные промпты разрешаем без предупреждений,
+  // чтобы проверить на практике, как разные модели их отрабатывают.
   const MAX_PROMPT_CHARS = 1500;
   const trimmed = String(textValue || "").trim().slice(0, MAX_PROMPT_CHARS);
 
@@ -2250,16 +2249,6 @@ export async function addPrompt(kind, textValue, chatId, env) {
     notes.push(
       "🌐 Промпт на русском — переведу на английский перед генерацией.\n" +
       "Модели понимают только английский, перевод кэшируется."
-    );
-  }
-
-  // ~1.3 токена на слово — грубая, но достаточная оценка для предупреждения
-  const words = trimmed.split(/\s+/).filter(Boolean).length;
-  if (Math.ceil(words * 1.3) > 70) {
-    notes.push(
-      `⚠️ Промпт длинный (~${words} слов). Модели на CLIP (SDXL, SD3, BRIA)\n` +
-      "читают только первые ~77 токенов, остальное отбросят.\n" +
-      "FLUX понимает длинные промпты — выберите его в /models."
     );
   }
 
