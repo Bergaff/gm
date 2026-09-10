@@ -342,6 +342,39 @@ function getGeminiProviders(env) {
 const DEFAULT_OPENROUTER_IMAGE_MODEL = "openrouter/free";
 const DEFAULT_OPENROUTER_IMAGE_DAILY_LIMIT = 20;
 
+function hashText(text) {
+  let value = 2166136261;
+  const str = String(text || "");
+  for (let i = 0; i < str.length; i++) {
+    value ^= str.charCodeAt(i);
+    value = Math.imul(value, 16777619);
+  }
+  return (value >>> 0).toString(36);
+}
+
+function openRouterModelBadKey(model) {
+  return `openrouter:image:bad:${hashText(model)}`;
+}
+
+async function isOpenRouterModelBad(env, model) {
+  if (!env?.BOT_KV || !model) return false;
+  return Boolean(await env.BOT_KV.get(openRouterModelBadKey(model)));
+}
+
+export async function markOpenRouterImageModelBad(env, model, reason = "bad", ttl = 14 * 86400) {
+  if (!env?.BOT_KV || !model) return;
+  await env.BOT_KV.put(openRouterModelBadKey(model), String(reason || "bad").slice(0, 120), {
+    expirationTtl: ttl,
+  });
+}
+
+export function openRouterModelFromTitle(title) {
+  const text = String(title || "").trim();
+  if (!text.toLowerCase().includes("openrouter")) return "";
+  const parts = text.split(/\s+[—-]\s+/);
+  return (parts[parts.length - 1] || "").trim();
+}
+
 export function getOpenRouterImageModels(env) {
   const raw = env?.OPENROUTER_IMAGE_MODELS || env?.OPENROUTER_IMAGE_MODEL || "";
   const configured = String(raw)
@@ -392,6 +425,100 @@ function openRouterProvider(model, index, env) {
 function getOpenRouterProviders(env) {
   if (!env?.OPENROUTER_API_KEY) return [];
   return getOpenRouterImageModels(env).map((model, index) => openRouterProvider(model, index, env));
+}
+
+function openRouterHeaders(env) {
+  const headers = {
+    Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = String(env.OPENROUTER_SITE_URL);
+  if (env.OPENROUTER_APP_NAME) headers["X-Title"] = String(env.OPENROUTER_APP_NAME);
+  return headers;
+}
+
+function looksLikeImageModel(model, fromImageEndpoint = false) {
+  if (fromImageEndpoint) return true;
+  const values = [
+    ...(model?.architecture?.output_modalities || []),
+    ...(model?.architecture?.input_modalities || []),
+    ...(model?.modalities || []),
+    ...(model?.output_modalities || []),
+    ...(model?.supported_parameters || []),
+  ].map((v) => String(v).toLowerCase());
+  return values.some((v) => v.includes("image"));
+}
+
+function isFreeOpenRouterRecord(model) {
+  const id = String(model?.id || model?.slug || "");
+  if (isFreeOpenRouterModel(id)) return true;
+  const p = model?.pricing || {};
+  const nums = [p.prompt, p.completion, p.image, p.request]
+    .filter((v) => v !== undefined && v !== null)
+    .map(Number);
+  return nums.length > 0 && nums.every((n) => Number.isFinite(n) && n === 0);
+}
+
+function extractOpenRouterModels(payload, fromImageEndpoint = false) {
+  const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+  return list
+    .filter((m) => m && (m.id || m.slug))
+    .filter((m) => isFreeOpenRouterRecord(m) && looksLikeImageModel(m, fromImageEndpoint))
+    .map((m) => String(m.id || m.slug).trim())
+    .filter(Boolean);
+}
+
+async function discoverOpenRouterFreeImageModels(env) {
+  if (!env?.OPENROUTER_API_KEY || !env?.BOT_KV) return [];
+  const cacheKey = "openrouter:image:models:v2";
+  try {
+    const cached = await env.BOT_KV.get(cacheKey, "json");
+    if (Array.isArray(cached) && cached.length) return cached;
+  } catch {}
+
+  const headers = openRouterHeaders(env);
+  const out = [];
+  for (const [url, imageEndpoint] of [
+    ["https://openrouter.ai/api/v1/images/models", true],
+    ["https://openrouter.ai/api/v1/models", false],
+  ]) {
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
+      out.push(...extractOpenRouterModels(await res.json(), imageEndpoint));
+    } catch {}
+  }
+
+  const unique = [...new Set(out)];
+  if (unique.length) {
+    try { await env.BOT_KV.put(cacheKey, JSON.stringify(unique), { expirationTtl: 6 * 3600 }); } catch {}
+  }
+  return unique;
+}
+
+async function openRouterCandidateModels(env, configuredModel) {
+  const configured = String(configuredModel || DEFAULT_OPENROUTER_IMAGE_MODEL).trim();
+  const discovered = await discoverOpenRouterFreeImageModels(env);
+  const raw = configured === "openrouter/free"
+    ? [...discovered, configured]
+    : [configured, ...discovered];
+  const unique = [...new Set(raw)].filter(Boolean);
+  const good = [];
+  for (const model of unique) {
+    if (!(await isOpenRouterModelBad(env, model))) good.push(model);
+  }
+  return good.length ? good : unique;
+}
+
+function openRouterSearchTimeout(env) {
+  const n = Number(env?.OPENROUTER_IMAGE_SEARCH_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 60000) : 55000;
+}
+
+function openRouterMaxCandidates(env) {
+  const n = Number(env?.OPENROUTER_IMAGE_MAX_CANDIDATES);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 10) : 3;
 }
 
 function openRouterLimit(env) {
@@ -528,52 +655,95 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
                error: `Не задан секрет ${provider.keyEnv || "OPENROUTER_API_KEY"}` };
     }
 
-    const quota = await reserveOpenRouterImageCall(env);
-    if (!quota.ok) {
-      return {
-        ok: false,
-        status: 429,
-        latency: Date.now() - started,
-        error: `OpenRouter дневной лимит ${quota.count}/${quota.limit} запросов исчерпан`,
-      };
-    }
+    const deadline = Date.now() + openRouterSearchTimeout(env);
+    const candidates = (await openRouterCandidateModels(env, provider.model))
+      .slice(0, openRouterMaxCandidates(env));
+    const errors = [];
 
-    const headers = {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-    if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = String(env.OPENROUTER_SITE_URL);
-    if (env.OPENROUTER_APP_NAME) headers["X-Title"] = String(env.OPENROUTER_APP_NAME);
+    for (const model of candidates) {
+      const left = deadline - Date.now();
+      if (left <= 1000) break;
 
-    const response = await fetch(provider.url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(provider.build(prompt, seed, negative)),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-
-    const latency = Date.now() - started;
-    if (!response.ok) {
-      const body = await response.text();
-      return { ok: false, status: response.status, latency, error: body.slice(0, 300) };
-    }
-
-    const payload = await response.json();
-    const base64 = extractBase64(payload);
-    if (base64) {
-      return { ok: true, status: 200, latency, bytes: base64ToBytes(base64), seed };
-    }
-    const url = extractUrl(payload);
-    if (url) {
-      const imageResponse = await fetch(url);
-      if (imageResponse.ok) {
-        return { ok: true, status: 200, latency: Date.now() - started,
-                 bytes: new Uint8Array(await imageResponse.arrayBuffer()), seed };
+      const quota = await reserveOpenRouterImageCall(env);
+      if (!quota.ok) {
+        return {
+          ok: false,
+          status: 429,
+          latency: Date.now() - started,
+          error: `OpenRouter дневной лимит ${quota.count}/${quota.limit} запросов исчерпан`,
+        };
       }
+
+      const response = await fetch(provider.url, {
+        method: "POST",
+        headers: openRouterHeaders(env),
+        body: JSON.stringify({ ...provider.build(prompt, seed, negative), model }),
+        signal: AbortSignal.timeout(Math.min(left, 60000)),
+      }).catch((e) => ({ timeoutError: e }));
+
+      const latency = Date.now() - started;
+      if (response.timeoutError) {
+        return {
+          ok: false,
+          status: 408,
+          latency,
+          error: `OpenRouter не нашёл рабочую модель за ${Math.round(openRouterSearchTimeout(env) / 1000)} сек: ${String(response.timeoutError?.message || response.timeoutError).slice(0, 120)}`,
+        };
+      }
+
+      if (!response.ok) {
+        const body = await response.text();
+        const err = body.slice(0, 300);
+        errors.push(`${model}: ${err.slice(0, 120)}`);
+        if ([400, 404, 410, 422].includes(response.status) || /no endpoints|unsupported|not support|model.*not|does not support|image.*not/i.test(err)) {
+          await markOpenRouterImageModelBad(env, model, err, 24 * 3600).catch(() => null);
+          continue;
+        }
+        return { ok: false, status: response.status, latency, error: err };
+      }
+
+      const payload = await response.json();
+      const base64 = extractBase64(payload);
+      if (base64) {
+        return {
+          ok: true,
+          status: 200,
+          latency,
+          bytes: base64ToBytes(base64),
+          seed,
+          model,
+          modelTitle: `${openRouterTitle(model)} — ${model}`,
+        };
+      }
+      const url = extractUrl(payload);
+      if (url) {
+        const imageResponse = await fetch(url, { signal: AbortSignal.timeout(Math.min(deadline - Date.now(), 15000)) }).catch(() => null);
+        if (imageResponse?.ok) {
+          return {
+            ok: true,
+            status: 200,
+            latency: Date.now() - started,
+            bytes: new Uint8Array(await imageResponse.arrayBuffer()),
+            seed,
+            model,
+            modelTitle: `${openRouterTitle(model)} — ${model}`,
+          };
+        }
+      }
+
+      const err = "нет изображения в ответе: " + JSON.stringify(payload).slice(0, 180);
+      errors.push(`${model}: ${err}`);
+      await markOpenRouterImageModelBad(env, model, err, 24 * 3600).catch(() => null);
     }
-    return { ok: false, status: response.status, latency,
-             error: "OpenRouter: нет изображения в ответе: " + JSON.stringify(payload).slice(0, 200) };
+
+    return {
+      ok: false,
+      status: 0,
+      latency: Date.now() - started,
+      error: errors.length
+        ? "OpenRouter: не нашёл рабочую free image модель: " + errors.slice(0, 3).join("; ")
+        : "OpenRouter: нет доступных free image моделей",
+    };
   }
 
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
@@ -771,11 +941,11 @@ export async function generateImage(prompt, env, options = {}) {
 
     const openrouterAuto = String(env.OPENROUTER_IMAGE_AUTO || "1") !== "0";
     const allowPaidOpenRouterAuto = String(env.OPENROUTER_IMAGE_ALLOW_PAID_AUTO || "") === "1";
+    const openrouter = all.filter((p) =>
+      p.openrouter && openrouterAuto && (isFreeOpenRouterModel(p.model) || allowPaidOpenRouterAuto)
+    );
     const rest = all.filter((p) =>
-      !p.binding &&
-      !p.gemini &&
-      (p.custom || p.openrouter || keys.length > 0) &&
-      (!p.openrouter || (openrouterAuto && (isFreeOpenRouterModel(p.model) || allowPaidOpenRouterAuto)))
+      !p.binding && !p.gemini && !p.openrouter && (p.custom || keys.length > 0)
     );
 
     const shuffle = (arr) => {
@@ -784,7 +954,9 @@ export async function generateImage(prompt, env, options = {}) {
       return [...arr.slice(off), ...arr.slice(0, off)];
     };
 
-    queue = [...cf, ...shuffle(rest)];
+    // OpenRouter первым: он сам ищет рабочую бесплатную image-модель.
+    // Если за лимит времени не нашёл — обычный цикл пойдёт дальше к Cloudflare.
+    queue = [...openrouter, ...cf, ...shuffle(rest)];
   }
 
   const attempts = [];
@@ -868,7 +1040,7 @@ export async function generateImage(prompt, env, options = {}) {
         ok: true,
         bytes: result.bytes,
         provider: provider.id,
-        model: provider.title,
+        model: result.modelTitle || provider.title,
         latency: result.latency,
         seed: result.seed,
         keyIndex: keyIndex + 1,

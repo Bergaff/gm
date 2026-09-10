@@ -1,4 +1,4 @@
-import { answerCallback, editMarkup, editMessage, sendMessage, escapeHtml } from "./telegram.js";
+import { answerCallback, editMarkup, editMessage, sendMessage, escapeHtml, tg } from "./telegram.js";
 import { getVote, setVote, countVotes, votesByProvider, getPost, countRecentSearchDislikes } from "./db.js";
 import {
   voteKeyboard,
@@ -30,7 +30,7 @@ import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
 import { isAdmin } from "./config.js";
 import { setPending } from "./pending.js";
-import { NIM_PROVIDERS, getApiKeys, getAllProviders } from "./images/nim.js";
+import { NIM_PROVIDERS, getApiKeys, getAllProviders, markOpenRouterImageModelBad, openRouterModelFromTitle } from "./images/nim.js";
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 import { localParts, withChatHoliday } from "./scheduler.js";
 
@@ -65,6 +65,38 @@ async function maybeSuggestNewSearchQuery(chatId, postId, env) {
   );
 }
 
+async function chatMemberCount(chatId, env) {
+  const key = `chat:members:${chatId}`;
+  try {
+    const cached = Number(await env.BOT_KV.get(key));
+    if (cached > 0) return cached;
+  } catch {}
+
+  const res = await tg("getChatMemberCount", { chat_id: chatId }, env).catch(() => null);
+  const count = Number(res?.result || 0);
+  if (count > 0) {
+    try { await env.BOT_KV.put(key, String(count), { expirationTtl: 3600 }); } catch {}
+  }
+  return count;
+}
+
+async function maybeRetireOpenRouterModel(chatId, postId, counts, env) {
+  const post = await getPost(env, postId).catch(() => null);
+  if (!post || !String(post.provider || "").startsWith("openrouter")) return;
+
+  const model = openRouterModelFromTitle(post.model || "");
+  if (!model || model === "openrouter/free") return;
+
+  const members = await chatMemberCount(chatId, env).catch(() => 0);
+  if (!members) return;
+  const threshold = Math.max(1, Math.ceil(members / 3));
+  if (counts.dislikes < threshold) return;
+
+  // Без сообщений в чат: просто временно убираем модель из кандидатов.
+  await markOpenRouterImageModelBad(env, model, `disliked ${counts.dislikes}/${members}`, 7 * 86400)
+    .catch(() => null);
+}
+
 export async function handleCallback(query, env) {
   const data = query.data || "";
   const chatId = String(query.message?.chat?.id ?? "");
@@ -97,7 +129,10 @@ export async function handleCallback(query, env) {
 
     const toast = next === 0 ? "Голос отменён" : next === 1 ? "👍 Спасибо!" : "👎 Учтено";
     await answerCallback(query.id, toast, env);
-    if (next === -1) await maybeSuggestNewSearchQuery(chatId, postId, env);
+    if (next === -1) {
+      await maybeSuggestNewSearchQuery(chatId, postId, env);
+      await maybeRetireOpenRouterModel(chatId, postId, counts, env);
+    }
     return;
   }
 

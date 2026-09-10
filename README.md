@@ -34,8 +34,9 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `GEMINI_TEXT_MODEL` — опционально, первая Gemini-модель для текста; по умолчанию `gemini-3.5-flash`
 - `GEMINI_TEXT_MODELS` — опционально, список Gemini-моделей для текста через запятую/пробел; бот пробует их по очереди, затем встроенный список `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`
 - `OPENROUTER_API_KEY` — опционально для генерации картинок через OpenRouter Image API; в авто-перебор попадают только free-модели (`:free` или `openrouter/free`)
-- `OPENROUTER_IMAGE_MODEL` / `OPENROUTER_IMAGE_MODELS` — опционально, модель(и) OpenRouter для картинок; по умолчанию `openrouter/free`; платные модели можно выбрать вручную в `/models`, но в auto они не попадают без `OPENROUTER_IMAGE_ALLOW_PAID_AUTO=1`
+- `OPENROUTER_IMAGE_MODEL` / `OPENROUTER_IMAGE_MODELS` — опционально, модель(и) OpenRouter для картинок; по умолчанию `openrouter/free`; бот запрашивает у OpenRouter список image-моделей, пропускает нерабочие и пробует следующую free-модель
 - `OPENROUTER_IMAGE_DAILY_LIMIT` — дневной лимит запросов к OpenRouter-картинкам со всех чатов; по умолчанию `20`
+- `OPENROUTER_IMAGE_SEARCH_TIMEOUT_MS` / `OPENROUTER_IMAGE_MAX_CANDIDATES` — сколько максимум искать рабочую OpenRouter-модель за одну генерацию; по умолчанию `55000` мс и `3` кандидата
 - `OPENROUTER_IMAGE_RESOLUTION` / `OPENROUTER_IMAGE_QUALITY` — опционально, параметры OpenRouter Image API; по умолчанию `1K` и `auto`
 - `IMAGE_PINNED_FALLBACK=1` — разрешить старое поведение: если вручную выбранная модель картинок упала, пробовать остальные; по умолчанию ручной выбор строгий
 - `GEMINI_TEXT_FREE_REQUESTS_PER_DAY` / `GEMINI_IMAGE_FREE_REQUESTS_PER_DAY` — опционально, локальный дневной лимит запросов для `/usage` и предупреждений; если не заданы, используется консервативная оценка 50 запросов/день
