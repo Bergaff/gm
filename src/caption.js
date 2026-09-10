@@ -523,7 +523,7 @@ export async function generateCaption(env, options = {}) {
 
   const keys = getTextApiKeys(env);
   const model = getTextModel(env);
-  const textModels = [...new Set([model, DEFAULT_LLM_MODEL, "qwen/qwq-32b"].filter(Boolean))];
+  const textModels = [...new Set([model, DEFAULT_LLM_MODEL].filter(Boolean))];
   const started = Date.now();
   const messages = buildPrompt(
     character,
@@ -817,7 +817,7 @@ export async function translatePrompt(prompt, env) {
   }
 
   let lastError = "перевод не удался";
-  const textModels = [...new Set([getTextModel(env), DEFAULT_LLM_MODEL, "qwen/qwq-32b"].filter(Boolean))];
+  const textModels = [...new Set([getTextModel(env), DEFAULT_LLM_MODEL].filter(Boolean))];
 
   for (const currentModel of textModels) {
     for (let i = 0; i < Math.min(keys.length, 2); i++) {

@@ -288,7 +288,30 @@ export function searchFallbackText(settings) {
   ].join("\n");
 }
 
+function publicGenerationError(error) {
+  const text = String(error || "").trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+
+  if (/429|quota|лимит|too many|rate limit/.test(lower)) {
+    return "лимит провайдера временно закончился, бот попробует запасной вариант";
+  }
+  if (/перевод|translate|translation|промпт не отправлен|http 404|404 page not found|http 410|gone/.test(lower)) {
+    return "перевод промпта сейчас недоступен; можно попробовать позже или написать промпт по-английски";
+  }
+  if (/workers ai.*пуст|пустой ответ|empty/.test(lower)) {
+    return "текстовый fallback сейчас не ответил, использован шаблон";
+  }
+  if (/cooldown/.test(lower)) {
+    return "модель временно пропущена после недавней ошибки";
+  }
+
+  return "провайдер временно не ответил, бот попробует запасной вариант";
+}
+
 export function morningTestReport(result) {
+  const captionPublicError = publicGenerationError(result.captionError);
+  const imagePublicError = publicGenerationError(result.error);
   const report = [
     `Статус: <code>${result.status}</code>`,
     result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
@@ -308,9 +331,9 @@ export function morningTestReport(result) {
     `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
     result.captionModel ? `Модель текста: <b>${escapeHtml(result.captionModel)}</b>` : null,
     result.captionError
-      ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
+      ? `⚠️ AI-подпись: ${escapeHtml(captionPublicError)}`
       : null,
-    result.error ? `\n<code>${escapeHtml(String(result.error).slice(0, 300))}</code>` : null,
+    result.error ? `\n⚠️ Картинка: ${escapeHtml(imagePublicError)}` : null,
   ].filter(Boolean).join("\n");
 
   return (result.status === "ok" ? "✅ " : "⚠️ ") + report;
@@ -656,7 +679,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     } else if (attempts.length) {
       const first = attempts.find((a) => !a.ok);
       if (first) {
-        hint = `\n<i>${escapeHtml(String(first.error || "").slice(0, 120))}</i>`;
+        hint = `\n<i>${escapeHtml(publicGenerationError(first.error || error))}</i>`;
       }
     }
 
