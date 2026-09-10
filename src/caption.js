@@ -816,62 +816,80 @@ export async function translatePrompt(prompt, env) {
     }
   }
 
-  try {
-    const response = await fetch(getTextUrl(env), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${keys[0]}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        model: getTextModel(env),
-        messages: [
-          {
-            role: "system",
-            content:
-              "You translate image-generation prompts from Russian to English. " +
-              "Rules:\n" +
-              "1. Output ONLY the English prompt, nothing else.\n" +
-              "2. Keep it as a comma-separated visual description.\n" +
-              "3. Preserve all details: objects, colors, lighting, style, mood.\n" +
-              "4. Do not add explanations, quotes or commentary.\n" +
-              "5. If the text is already English, return it unchanged.",
+  let lastError = "перевод не удался";
+  const textModels = [...new Set([getTextModel(env), DEFAULT_LLM_MODEL, "qwen/qwq-32b"].filter(Boolean))];
+
+  for (const currentModel of textModels) {
+    for (let i = 0; i < Math.min(keys.length, 2); i++) {
+      try {
+        const response = await fetch(getTextUrl(env), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${keys[i]}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
           },
-          { role: "user", content: original },
-        ],
-        temperature: 0.2,
-        // хватает на промпт до ~1500 символов после перевода
-        max_tokens: 600,
-      }),
-      signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
-    });
+          body: JSON.stringify({
+            model: currentModel,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You translate image-generation prompts from Russian to English. " +
+                  "Rules:\n" +
+                  "1. Output ONLY the English prompt, nothing else.\n" +
+                  "2. Keep it as a comma-separated visual description.\n" +
+                  "3. Preserve all details: objects, colors, lighting, style, mood.\n" +
+                  "4. Do not add explanations, quotes or commentary.\n" +
+                  "5. If the text is already English, return it unchanged.",
+              },
+              { role: "user", content: original },
+            ],
+            temperature: 0.2,
+            // хватает на промпт до ~1500 символов после перевода
+            max_tokens: 600,
+          }),
+          signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
+        });
 
-    if (!response.ok) {
-      return { text: original, translated: false, error: `HTTP ${response.status}` };
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          lastError = `перевод HTTP ${response.status} (${currentModel})` +
+            (body ? `: ${body.slice(0, 120)}` : "");
+          // 410 Gone / 404 — конкретная модель снята или не найдена: идём к следующей.
+          if ([404, 410].includes(response.status)) break;
+          // 401/403/429 — может помочь следующий ключ.
+          if ([401, 403, 429].includes(response.status) && i + 1 < keys.length) continue;
+          break;
+        }
+
+        const data = await response.json();
+        let out = String(data?.choices?.[0]?.message?.content || "").trim();
+
+        out = out.replace(/^["«„']+|["»“']+$/g, "").trim();
+        out = out.replace(/[*_`#]/g, "");
+        out = out.split(/\n{2,}/)[0].trim();
+
+        // Перевод не удался — в ответе всё ещё кириллица
+        if (!out || needsTranslation(out)) {
+          lastError = `модель ${currentModel} не перевела`;
+          continue;
+        }
+
+        // Кладём в кэш на 90 дней
+        try {
+          await env.BOT_KV.put(key, out, { expirationTtl: 90 * 24 * 60 * 60 });
+        } catch {
+          // не критично
+        }
+
+        return { text: out, translated: true, cached: false };
+      } catch (e) {
+        lastError = String(e).slice(0, 100);
+        if (i + 1 >= keys.length) break;
+      }
     }
-
-    const data = await response.json();
-    let out = String(data?.choices?.[0]?.message?.content || "").trim();
-
-    out = out.replace(/^["«„']+|["»“']+$/g, "").trim();
-    out = out.replace(/[*_`#]/g, "");
-    out = out.split(/\n{2,}/)[0].trim();
-
-    // Перевод не удался — в ответе всё ещё кириллица
-    if (!out || needsTranslation(out)) {
-      return { text: original, translated: false, error: "модель не перевела" };
-    }
-
-    // Кладём в кэш на 90 дней
-    try {
-      await env.BOT_KV.put(key, out, { expirationTtl: 90 * 24 * 60 * 60 });
-    } catch {
-      // не критично
-    }
-
-    return { text: out, translated: true, cached: false };
-  } catch (e) {
-    return { text: original, translated: false, error: String(e).slice(0, 100) };
   }
+
+  return { text: original, translated: false, error: lastError };
 }
