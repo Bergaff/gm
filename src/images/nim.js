@@ -253,8 +253,9 @@ export const CF_PROVIDERS = [
  * Формат ответа отличается от остальных: картинка лежит в
  * candidates[0].content.parts[].inlineData.data (base64).
  */
-const DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image-preview";
+const DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.6";
 const DEFAULT_GEMINI_IMAGE_MODELS = [
+  "gemini-3.6",
   "gemini-2.5-flash-image-preview",
   "gemini-2.5-flash-image",
 ];
@@ -291,10 +292,19 @@ function geminiImagePrompt(prompt, negative = "") {
   ].filter(Boolean).join("\n");
 }
 
+function suggestedGeminiImageModels(errorText) {
+  const out = [];
+  const re = /models\/([a-zA-Z0-9_.-]+)/g;
+  let m;
+  while ((m = re.exec(String(errorText || "")))) out.push(m[1]);
+  return [...new Set(out)];
+}
+
 function geminiImageTitle(model) {
+  if (model.includes("3.6")) return "Gemini 3.6 Image";
   if (model.includes("3-pro")) return "Gemini 3 Pro Image (лучшее качество, может быть платным)";
   if (model.includes("preview")) return "Gemini 2.5 Flash Image Preview";
-  return "Gemini 2.5 Flash Image";
+  return "Gemini Image";
 }
 
 function geminiImageProvider(model, index) {
@@ -677,6 +687,16 @@ export async function generateImage(prompt, env, options = {}) {
       latency: result.latency,
       error: result.error,
     });
+
+    // Если Gemini вернул 404 с подсказкой «use models/...», добавляем
+    // подсказанную модель сразу следующей в очередь. Так новые model id
+    // можно подхватывать без срочного релиза.
+    if (provider.gemini && !result.ok && result.error) {
+      for (const suggested of suggestedGeminiImageModels(result.error)) {
+        const alreadyQueued = queue.some((p) => p.gemini && p.model === suggested);
+        if (!alreadyQueued) queue.splice(queue.indexOf(provider) + 1, 0, geminiImageProvider(suggested, queue.length));
+      }
+    }
 
     if (result.ok) {
       return {
