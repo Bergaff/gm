@@ -339,7 +339,8 @@ function getGeminiProviders(env) {
   return [];
 }
 
-const DEFAULT_OPENROUTER_IMAGE_MODEL = "bytedance-seed/seedream-4.5";
+const DEFAULT_OPENROUTER_IMAGE_MODEL = "openrouter/free";
+const DEFAULT_OPENROUTER_IMAGE_DAILY_LIMIT = 20;
 
 export function getOpenRouterImageModels(env) {
   const raw = env?.OPENROUTER_IMAGE_MODELS || env?.OPENROUTER_IMAGE_MODEL || "";
@@ -350,11 +351,17 @@ export function getOpenRouterImageModels(env) {
   return [...new Set([...configured, DEFAULT_OPENROUTER_IMAGE_MODEL])];
 }
 
+function isFreeOpenRouterModel(model) {
+  const m = String(model || "").toLowerCase();
+  return m === "openrouter/free" || m.endsWith(":free");
+}
+
 function openRouterTitle(model) {
-  if (model.includes("seedream")) return "OpenRouter Seedream Image";
-  if (model.includes("gemini")) return "OpenRouter Gemini Image";
-  if (model.includes("gpt-image")) return "OpenRouter GPT Image";
-  return "OpenRouter Image";
+  const free = isFreeOpenRouterModel(model) ? " бесплатная" : "";
+  if (model.includes("seedream")) return "OpenRouter Seedream Image" + free;
+  if (model.includes("gemini")) return "OpenRouter Gemini Image" + free;
+  if (model.includes("gpt-image")) return "OpenRouter GPT Image" + free;
+  return "OpenRouter Image" + free;
 }
 
 function openRouterProvider(model, index, env) {
@@ -385,6 +392,29 @@ function openRouterProvider(model, index, env) {
 function getOpenRouterProviders(env) {
   if (!env?.OPENROUTER_API_KEY) return [];
   return getOpenRouterImageModels(env).map((model, index) => openRouterProvider(model, index, env));
+}
+
+function openRouterLimit(env) {
+  const n = Number(env?.OPENROUTER_IMAGE_DAILY_LIMIT);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_OPENROUTER_IMAGE_DAILY_LIMIT;
+}
+
+function openRouterDayKey() {
+  return `openrouter:image:${new Date().toISOString().slice(0, 10)}`;
+}
+
+async function reserveOpenRouterImageCall(env) {
+  const limit = openRouterLimit(env);
+  if (!limit) return { ok: false, count: 0, limit };
+  if (!env?.BOT_KV) return { ok: true, count: 0, limit };
+
+  const key = openRouterDayKey();
+  const count = Number(await env.BOT_KV.get(key)) || 0;
+  if (count >= limit) return { ok: false, count, limit };
+  const next = count + 1;
+  await env.BOT_KV.put(key, String(next), { expirationTtl: 2 * 86400 });
+  await addUsage(env, 0, "openrouter_image");
+  return { ok: true, count: next, limit };
 }
 
 
@@ -496,6 +526,16 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
     if (!key) {
       return { ok: false, status: 0, latency: 0,
                error: `Не задан секрет ${provider.keyEnv || "OPENROUTER_API_KEY"}` };
+    }
+
+    const quota = await reserveOpenRouterImageCall(env);
+    if (!quota.ok) {
+      return {
+        ok: false,
+        status: 429,
+        latency: Date.now() - started,
+        error: `OpenRouter дневной лимит ${quota.count}/${quota.limit} запросов исчерпан`,
+      };
     }
 
     const headers = {
@@ -721,19 +761,20 @@ export async function generateImage(prompt, env, options = {}) {
     }
   } else {
     // ПРИОРИТЕТ: Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
-    // OpenRouter может быть платным, поэтому в авто-перебор попадает только
-    // при явном OPENROUTER_IMAGE_AUTO=1; вручную выбрать его в /models можно.
+    // OpenRouter в авто-переборе использует только модели с :free или
+    // openrouter/free. Платные OpenRouter-модели можно выбрать вручную.
     const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
     const cf = getCfProviders(env)
       .slice()
       .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
 
-    const openrouterAuto = String(env.OPENROUTER_IMAGE_AUTO || "") === "1";
+    const openrouterAuto = String(env.OPENROUTER_IMAGE_AUTO || "1") !== "0";
+    const allowPaidOpenRouterAuto = String(env.OPENROUTER_IMAGE_ALLOW_PAID_AUTO || "") === "1";
     const rest = all.filter((p) =>
       !p.binding &&
       !p.gemini &&
       (p.custom || p.openrouter || keys.length > 0) &&
-      (!p.openrouter || openrouterAuto)
+      (!p.openrouter || (openrouterAuto && (isFreeOpenRouterModel(p.model) || allowPaidOpenRouterAuto)))
     );
 
     const shuffle = (arr) => {
@@ -755,7 +796,7 @@ export async function generateImage(prompt, env, options = {}) {
         ok: false,
         status: 0,
         latency: 0,
-        error: "В авто-режиме нет бесплатных/разрешённых провайдеров. Выберите OpenRouter вручную в /models или включите OPENROUTER_IMAGE_AUTO=1.",
+        error: "В авто-режиме нет доступных провайдеров. Для OpenRouter нужны OPENROUTER_API_KEY и free-модель (:free или openrouter/free).", 
       }],
     };
   }

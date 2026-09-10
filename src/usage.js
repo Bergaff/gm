@@ -60,14 +60,14 @@ export async function addUsage(env, neurons, kind = "other") {
   // и мы считаем их запросы, а не нейроны. Раньше нулевой расход
   // отсекался этой проверкой, и счётчики оставались пустыми.
   if (!env?.BOT_KV) return;
-  const requestKinds = new Set(["gemini", "gemini_text", "gemini_image", "nvidia"]);
+  const requestKinds = new Set(["gemini", "gemini_text", "gemini_image", "nvidia", "openrouter", "openrouter_image"]);
   if (!neurons && !requestKinds.has(kind)) return;
   if (neurons < 0) return;
 
   try {
     const key = dayKey();
     const cur = (await env.BOT_KV.get(key, "json")) ||
-      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
+      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
 
     cur.total += neurons;
     cur.calls += 1;
@@ -86,6 +86,7 @@ export async function addUsage(env, neurons, kind = "other") {
       cur.geminiImage = (cur.geminiImage || 0) + 1;
     }
     else if (kind === "nvidia") cur.nvidia = (cur.nvidia || 0) + 1;
+    else if (kind === "openrouter" || kind === "openrouter_image") cur.openrouterImage = (cur.openrouterImage || 0) + 1;
 
     // Держим 8 дней, чтобы показывать историю за неделю
     await env.BOT_KV.put(key, JSON.stringify(cur), { expirationTtl: 8 * 86400 });
@@ -97,9 +98,9 @@ export async function addUsage(env, neurons, kind = "other") {
 export async function getUsage(env, offsetDays = 0) {
   try {
     const data = await env.BOT_KV.get(dayKey(offsetDays), "json");
-    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
+    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
   } catch {
-    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
+    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
   }
 }
 
@@ -157,6 +158,9 @@ export async function usageText(env, escapeHtml) {
     numEnv(env, "GEMINI_FREE_REQUESTS_PER_DAY", DEFAULT_GEMINI_REQUESTS_PER_DAY));
   const geminiText = today.geminiText || 0;
   const geminiImage = today.geminiImage || 0;
+  const openrouterImageLimit = numEnv(env, "OPENROUTER_IMAGE_DAILY_LIMIT", 20);
+  const openrouterImage = today.openrouterImage || 0;
+  const openrouterImagePct = Math.min(100, (openrouterImage / openrouterImageLimit) * 100);
   const geminiTextPct = Math.min(100, (geminiText / geminiTextLimit) * 100);
   const geminiImagePct = Math.min(100, (geminiImage / geminiImageLimit) * 100);
 
@@ -184,6 +188,7 @@ export async function usageText(env, escapeHtml) {
     `📞 всего Gemini: ${today.gemini || 0} запросов`,
     "",
     "<b>Другие провайдеры</b>",
+    `🧭 OpenRouter картинки: ${openrouterImage}/${openrouterImageLimit} запросов (${openrouterImagePct.toFixed(0)}%)`,
     `🟢 NVIDIA: ${today.nvidia || 0} запросов` +
       (today.nvidia ? " (свой лимит/кредиты)" : ""),
   ];
@@ -217,6 +222,12 @@ export async function usageText(env, escapeHtml) {
     lines.push("", "🔴 <b>Gemini близко к дневному лимиту</b> — стоит меньше гонять /test или поднять лимит в переменных.");
   } else if (geminiTextPct >= 70 || geminiImagePct >= 70) {
     lines.push("", "🟡 Gemini: израсходовано больше 70% от локального дневного лимита.");
+  }
+
+  if (openrouterImagePct >= 100) {
+    lines.push("", "🔴 <b>OpenRouter картинки на сегодня остановлены</b> — достигнут лимит запросов.");
+  } else if (openrouterImagePct >= 70) {
+    lines.push("", "🟡 OpenRouter: близко к дневному лимиту картинок.");
   }
 
   lines.push(
