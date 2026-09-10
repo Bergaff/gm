@@ -18,7 +18,14 @@ const DEFAULT_LLM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 // meta/llama-3.3-70b-instruct умер 2026-08-26 и теперь отдаёт 410 Gone.
 // Новый безопасный дефолт для NVIDIA integrate.api.nvidia.com.
 const DEFAULT_LLM_MODEL = "qwen/qwen3-next-80b-a3b-instruct";
-const DEFAULT_GEMINI_TEXT_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash";
+const DEFAULT_GEMINI_TEXT_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+];
 
 function normalizeTraits(traits) {
   if (!Array.isArray(traits)) return [];
@@ -46,11 +53,31 @@ function captionTraitsBlock(traits) {
 const CF_TEXT_MODEL = "@cf/openai/gpt-oss-20b";
 
 export function getGeminiTextModel(env) {
-  return String(env.GEMINI_TEXT_MODEL || DEFAULT_GEMINI_TEXT_MODEL).trim().replace(/^models\//, "");
+  return getGeminiTextModels(env)[0];
 }
 
-async function generateViaGemini(env, messages) {
-  const model = getGeminiTextModel(env);
+export function getGeminiTextModels(env) {
+  const raw = env.GEMINI_TEXT_MODELS || env.GEMINI_TEXT_MODEL || "";
+  const configured = String(raw)
+    .split(/[,\s]+/)
+    .map((m) => m.trim().replace(/^models\//, ""))
+    .filter(Boolean);
+  return [...new Set([
+    ...configured,
+    ...DEFAULT_GEMINI_TEXT_MODELS,
+    DEFAULT_GEMINI_TEXT_MODEL,
+  ])];
+}
+
+function suggestedGeminiModels(errorText) {
+  const out = [];
+  const re = /models\/([a-zA-Z0-9_.-]+)/g;
+  let m;
+  while ((m = re.exec(String(errorText || "")))) out.push(m[1]);
+  return [...new Set(out)];
+}
+
+async function generateViaGemini(env, messages, model = getGeminiTextModel(env)) {
   const system = messages.find((m) => m.role === "system")?.content || "";
   const user = messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n\n");
 
@@ -460,18 +487,32 @@ export async function generateCaption(env, options = {}) {
 
   const mode = String(textProvider || "gemini").toLowerCase();
 
-  // ПРИОРИТЕТ: Gemini 2.5 Flash (если есть GEMINI_API_KEY) — сейчас это
-  // основной путь для текста. Остальные API не скрыты и остаются fallback.
+  // ПРИОРИТЕТ: Gemini (если есть GEMINI_API_KEY) — сейчас это
+  // основной путь для текста. Пробуем несколько актуальных моделей по очереди.
   if (mode !== "external" && mode !== "cf" && env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
     try {
-      const text = cleanup(await generateViaGemini(env, messages));
-      const problem = captionProblem(text);
-      if (text && !problem) {
-        return { ok: true, text, model: "gemini/" + getGeminiTextModel(env),
-                 latency: Date.now() - started };
+      const geminiModels = getGeminiTextModels(env);
+      for (let i = 0; i < geminiModels.length; i++) {
+        try {
+          const modelName = geminiModels[i];
+          const text = cleanup(await generateViaGemini(env, messages, modelName));
+          const problem = captionProblem(text);
+          if (text && !problem) {
+            return { ok: true, text, model: "gemini/" + modelName,
+                     latency: Date.now() - started };
+          }
+          geminiError = problem ? `Gemini ${modelName} выдал брак (${problem})` : `Gemini ${modelName} вернул пустой ответ`;
+          lastError = geminiError;
+        } catch (e) {
+          const msg = String(e?.message || e);
+          geminiError = msg.slice(0, 220);
+          lastError = geminiError;
+          // Если Google прямо подсказал новый models/..., добавляем его в очередь.
+          for (const suggested of suggestedGeminiModels(msg)) {
+            if (!geminiModels.includes(suggested)) geminiModels.splice(i + 1, 0, suggested);
+          }
+        }
       }
-      geminiError = problem ? `Gemini выдал брак (${problem})` : "Gemini вернул пустой ответ";
-      lastError = geminiError;
     } catch (e) {
       geminiError = String(e?.message || e).slice(0, 180);
       lastError = geminiError;
@@ -671,14 +712,20 @@ export async function translatePrompt(prompt, env) {
 
   if (env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
     try {
-      const t = await generateViaGemini(env, [
-        { role: "system", content: "Translate the user's image-generation prompt from Russian to English. Reply with the English prompt only. No explanations, no quotes." },
-        { role: "user", content: original },
-      ]);
-      const clean = String(t || "").trim().replace(/^["«„']+|["»“']+$/g, "");
-      if (clean && !needsTranslation(clean)) {
-        try { await env.BOT_KV.put(key, clean, { expirationTtl: 90 * 24 * 60 * 60 }); } catch {}
-        return { text: clean, translated: true, cached: false, provider: "gemini" };
+      for (const modelName of getGeminiTextModels(env)) {
+        try {
+          const t = await generateViaGemini(env, [
+            { role: "system", content: "Translate the user's image-generation prompt from Russian to English. Reply with the English prompt only. No explanations, no quotes." },
+            { role: "user", content: original },
+          ], modelName);
+          const clean = String(t || "").trim().replace(/^["«„']+|["»“']+$/g, "");
+          if (clean && !needsTranslation(clean)) {
+            try { await env.BOT_KV.put(key, clean, { expirationTtl: 90 * 24 * 60 * 60 }); } catch {}
+            return { text: clean, translated: true, cached: false, provider: "gemini" };
+          }
+        } catch {
+          // пробуем следующую Gemini-модель
+        }
       }
     } catch {
       // не вышло — пробуем остальные способы ниже

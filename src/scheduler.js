@@ -63,12 +63,20 @@ export function weekdayRu(weekday) {
 export function withChatHoliday(now, settings = {}) {
   const custom = settings.holidays?.[String(now.date || "").slice(5, 10)];
   if (!custom) return now;
+
+  // Старый формат был строкой и всегда делал день выходным. Новый формат:
+  // { name, isWeekend }, потому что для праздника чата пользователь сам
+  // выбирает: оставить рабочее расписание или использовать выходное.
+  const name = typeof custom === "string" ? custom : custom.name;
+  const asWeekend = typeof custom === "string" ? true : custom.isWeekend === true;
+
   return {
     ...now,
-    isWeekend: true,
+    isWeekend: asWeekend ? true : now.isWeekend,
     isHoliday: true,
-    holidayName: String(custom),
+    holidayName: String(name || "праздник чата"),
     customHoliday: true,
+    customHolidayWeekend: asWeekend,
   };
 }
 

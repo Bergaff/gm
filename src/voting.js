@@ -24,6 +24,7 @@ import {
   sendMorning,
   morningTestReport,
   pickPrompt,
+  holidayModeKeyboard,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -144,6 +145,44 @@ export async function handleCallback(query, env) {
     } else {
       await sendMessage(chatId, finalText, env);
     }
+    return;
+  }
+
+  // ── Режим пользовательского праздника: будний или выходной ───────────
+  if (data.startsWith("h|")) {
+    const role = await getRole(chatId, userId, env);
+    if (!canEdit(role)) {
+      await answerCallback(query.id, "⛔ Доступно администратору чата", env, true);
+      return;
+    }
+
+    const [, action, date, mode] = data.split("|");
+    if (action !== "mode") return;
+
+    const s = await getSettings(chatId, env);
+    const holidays = { ...(s.holidays || {}) };
+    const existing = holidays[date];
+    if (!existing) {
+      await answerCallback(query.id, "Праздник не найден", env, true);
+      return;
+    }
+
+    const name = typeof existing === "string" ? existing : existing.name;
+    const isWeekend = mode === "weekend";
+    holidays[date] = { name, isWeekend };
+    await patchSettings(chatId, { holidays }, env);
+
+    await editMessage(
+      chatId,
+      query.message.message_id,
+      `✅ Праздник <b>${date}</b> — ${escapeHtml(name)} сохранён.\n` +
+        (isWeekend
+          ? "В этот день будет использоваться расписание и настроение выходного."
+          : "В этот день останется буднее расписание, но праздник будет учтён в подписи."),
+      env,
+      holidayModeKeyboard(date, isWeekend)
+    );
+    await answerCallback(query.id, isWeekend ? "Будет выходным" : "Останется будним", env);
     return;
   }
 

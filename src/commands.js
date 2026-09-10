@@ -264,6 +264,16 @@ export function searchFallbackKeyboard(current = "nim") {
   };
 }
 
+export function holidayModeKeyboard(date, current = null) {
+  const mark = (v) => v === current ? "✅ " : "";
+  return {
+    inline_keyboard: [[
+      { text: `${mark(false)}📅 Оставить будним`, callback_data: `h|mode|${date}|workday` },
+      { text: `${mark(true)}🏖 Сделать выходным`, callback_data: `h|mode|${date}|weekend` },
+    ]],
+  };
+}
+
 export function searchFallbackText(settings) {
   return [
     "🔎 <b>Поисковый запрос подключён</b>",
@@ -1903,7 +1913,11 @@ async function handleHolidayCommand(command, value, chatId, env) {
     await sendMessage(
       chatId,
       "🎉 <b>Праздники этого чата</b>\n\n" +
-        list.map(([date, name]) => `• <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)}`).join("\n"),
+        list.map(([date, h]) => {
+          const name = typeof h === "string" ? h : h.name;
+          const isWeekend = typeof h === "string" ? true : h.isWeekend === true;
+          return `• <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)} (${isWeekend ? "выходной" : "будний"})`;
+        }).join("\n"),
       env
     );
     return;
@@ -1926,13 +1940,19 @@ async function handleHolidayCommand(command, value, chatId, env) {
   const date = parseBirthdayDate(parts[0]);
   const name = parts.slice(1).join(" ").trim().slice(0, 80);
   if (!date || !name) {
-    await sendMessage(chatId, "Использование: <code>/holiday 31.12 Предновогодний день</code>\n\nВ этот день бот будет считать расписание выходным и учитывать праздник в подписи.", env);
+    await sendMessage(chatId, "Использование: <code>/holiday 31.12 Предновогодний день</code>\n\nПосле добавления бот спросит, оставить день будним или считать выходным.", env);
     return;
   }
 
-  holidays[date] = name;
+  holidays[date] = { name, isWeekend: false };
   await patchSettings(chatId, { holidays }, env);
-  await sendMessage(chatId, `✅ Праздник добавлен: <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)}. В этот день будет использоваться время выходного дня.`, env);
+  await sendMessage(
+    chatId,
+    `✅ Праздник добавлен: <b>${formatBirthdayDate(date)}</b> — ${escapeHtml(name)}.\n\n` +
+      "Как считать этот день в расписании?",
+    env,
+    { reply_markup: holidayModeKeyboard(date, false) }
+  );
 }
 
 async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
@@ -2319,8 +2339,8 @@ function helpText(role) {
     "/birthday_remove — удалить свой или reply-цель",
     "",
     "<b>Праздники чата</b>",
-    "/holiday 31.12 Название — добавить праздник",
-    "/holidays — список праздников чата",
+    "/holiday 31.12 Название — добавить праздник и выбрать: будний или выходной",
+    "/holidays — список праздников чата с режимом дня",
     "/holiday_remove 31.12 — удалить праздник",
     "",
     "<b>Прочее</b>",
