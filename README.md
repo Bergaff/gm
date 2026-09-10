@@ -38,5 +38,5 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `BRAVE_SEARCH_API_KEY` — опционально для источника `search` (Brave Images)
 - `GOOGLE_SEARCH_CX` — опционально для источника `search` (старый Google Programmable Search Engine, если уже был включён full web)
 - `GOOGLE_SEARCH_API_KEY` — опционально; если не задан, используется `GOOGLE_API_KEY`
-- `IMAGE_SEARCH_PROVIDER` — `auto`, `pixabay`, `pexels`, `serper`, `brave`, `google` или `yandex` (по умолчанию `auto`)
+- `IMAGE_SEARCH_PROVIDER` — `auto`, `yandex`, `duckduckgo`, `pixabay`, `pexels`, `serper`, `brave` или `google` (по умолчанию `auto`; для релевантности сначала Yandex/DuckDuckGo)
 - `WEBHOOK_SECRET`

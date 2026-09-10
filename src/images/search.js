@@ -275,6 +275,65 @@ async function braveSearch(query, env, force = false) {
   return unique(items);
 }
 
+
+async function duckDuckGoSearch(query, env, force = false) {
+  const page = Math.max(0, Math.floor(Math.random() * 5));
+  const cacheKey = `imgsearch:duckduckgo:${hash(query)}:${page}`;
+  if (!force) {
+    const cached = await env.BOT_KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.length) return cached;
+  }
+
+  const homeUrl = "https://duckduckgo.com/?iax=images&ia=images&q=" + encodeURIComponent(query);
+  const home = await fetch(homeUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 GoodMorningBot/2.0",
+      "Accept-Language": "ru,en;q=0.8",
+    },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!home.ok) throw new Error(`DuckDuckGo HTTP ${home.status}`);
+
+  const html = await home.text();
+  const vqd =
+    html.match(/vqd=['"]([^'"]+)['"]/)?.[1] ||
+    html.match(/vqd=([^&"']+)/)?.[1];
+  if (!vqd) throw new Error("DuckDuckGo не вернул search token");
+
+  const url =
+    "https://duckduckgo.com/i.js" +
+    `?l=ru-ru&o=json&q=${encodeURIComponent(query)}` +
+    `&vqd=${encodeURIComponent(vqd)}` +
+    "&f=,,,,,&p=1" +
+    (page ? `&s=${page * 50}` : "");
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 GoodMorningBot/2.0",
+      "Accept": "application/json",
+      "Referer": homeUrl,
+    },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`DuckDuckGo Images HTTP ${response.status}: ${body.slice(0, 180)}`);
+  }
+
+  const data = await response.json();
+  const items = (data.results || []).map((item) => ({
+    link: item.image || item.thumbnail,
+    title: item.title || query,
+    contextLink: item.url || "duckduckgo.com",
+    mime: "",
+    width: item.width || null,
+    height: item.height || null,
+  })).filter(imageLike);
+
+  await env.BOT_KV.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+  return unique(items);
+}
+
 async function yandexSearch(query, env, force = false) {
   const p = Math.floor(Math.random() * 8);
   const cacheKey = `imgsearch:yandex:${hash(query)}:${p}`;
@@ -319,22 +378,24 @@ async function yandexSearch(query, env, force = false) {
 async function searchImages(query, env, force = false) {
   const provider = String(env.IMAGE_SEARCH_PROVIDER || "auto").toLowerCase();
 
+  if (provider === "yandex") return { provider, results: await yandexSearch(query, env, force) };
+  if (provider === "duckduckgo" || provider === "ddg") return { provider: "duckduckgo", results: await duckDuckGoSearch(query, env, force) };
   if (provider === "pixabay") return { provider, results: await pixabaySearch(query, env, force) };
   if (provider === "pexels") return { provider, results: await pexelsSearch(query, env, force) };
   if (provider === "serper") return { provider, results: await serperSearch(query, env, force) };
   if (provider === "brave") return { provider, results: await braveSearch(query, env, force) };
-  if (provider === "yandex") return { provider, results: await yandexSearch(query, env, force) };
   if (provider === "google") return { provider, results: await googleSearch(query, env, force) };
 
-  // auto: сначала постоянные бесплатные стоковые API, затем trial/credit API,
-  // затем старый Google CSE и неофициальный Yandex как последний шанс.
+  // auto для релевантности: сначала бесплатные поисковые выдачи, близкие
+  // к обычному поиску, затем стоковые API, затем trial/credit API.
   const order = [
+    ["yandex", yandexSearch],
+    ["duckduckgo", duckDuckGoSearch],
     ["pixabay", pixabaySearch],
     ["pexels", pexelsSearch],
     ["serper", serperSearch],
     ["brave", braveSearch],
     ["google", googleSearch],
-    ["yandex", yandexSearch],
   ];
 
   let lastError = null;

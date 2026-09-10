@@ -1768,6 +1768,8 @@ async function runDiagnostics(chatId, env) {
   lines.push("<b>Ключи</b>");
   lines.push(`${env.BOT_TOKEN ? "✅" : "❌"} BOT_TOKEN`);
   lines.push(`${env.GOOGLE_API_KEY ? "✅" : "❌"} GOOGLE_API_KEY`);
+  lines.push("✅ Yandex Images: без ключа (неофициальная выдача)");
+  lines.push("✅ DuckDuckGo Images: без ключа (неофициальная выдача)");
   lines.push(`${env.PIXABAY_API_KEY ? "✅" : "➖"} Pixabay Images: PIXABAY_API_KEY`);
   lines.push(`${env.PEXELS_API_KEY ? "✅" : "➖"} Pexels Images: PEXELS_API_KEY`);
   lines.push(`${env.SERPER_API_KEY ? "✅" : "➖"} Serper Images: SERPER_API_KEY`);
