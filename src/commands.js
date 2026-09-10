@@ -940,7 +940,6 @@ export function modelsText(providers, current, stats, keyCount) {
     "🤖 <b>Модели генерации</b>",
     "",
     `Ключей NVIDIA загружено: <b>${keyCount}</b>`,
-    `OpenRouter: <b>${providers.some((p) => p.openrouter) ? "подключён" : "нет ключа"}</b>`,
     `Доступно моделей: <b>${providers.length}</b>`,
     "",
   ];

@@ -188,7 +188,6 @@ export async function usageText(env, escapeHtml) {
     `📞 всего Gemini: ${today.gemini || 0} запросов`,
     "",
     "<b>Другие провайдеры</b>",
-    `🧭 OpenRouter картинки: ${openrouterImage}/${openrouterImageLimit} запросов (${openrouterImagePct.toFixed(0)}%)`,
     `🟢 NVIDIA: ${today.nvidia || 0} запросов` +
       (today.nvidia ? " (свой лимит/кредиты)" : ""),
   ];
@@ -224,11 +223,6 @@ export async function usageText(env, escapeHtml) {
     lines.push("", "🟡 Gemini: израсходовано больше 70% от локального дневного лимита.");
   }
 
-  if (openrouterImagePct >= 100) {
-    lines.push("", "🔴 <b>OpenRouter картинки на сегодня остановлены</b> — достигнут лимит запросов.");
-  } else if (openrouterImagePct >= 70) {
-    lines.push("", "🟡 OpenRouter: близко к дневному лимиту картинок.");
-  }
 
   lines.push(
     "",

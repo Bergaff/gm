@@ -423,8 +423,10 @@ function openRouterProvider(model, index, env) {
 }
 
 function getOpenRouterProviders(env) {
-  if (!env?.OPENROUTER_API_KEY) return [];
-  return getOpenRouterImageModels(env).map((model, index) => openRouterProvider(model, index, env));
+  // OpenRouter для картинок скрыт: у free-роута фактически нет бесплатной
+  // генерации изображений. Код оставляем как задел, но в /models и auto он
+  // не попадает, даже если OPENROUTER_API_KEY задан.
+  return [];
 }
 
 function openRouterHeaders(env) {
@@ -932,18 +934,12 @@ export async function generateImage(prompt, env, options = {}) {
     }
   } else {
     // ПРИОРИТЕТ: Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
-    // OpenRouter в авто-переборе использует только модели с :free или
-    // openrouter/free. Платные OpenRouter-модели можно выбрать вручную.
+    // OpenRouter для картинок скрыт и в auto не участвует.
     const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
     const cf = getCfProviders(env)
       .slice()
       .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
 
-    const openrouterAuto = String(env.OPENROUTER_IMAGE_AUTO || "1") !== "0";
-    const allowPaidOpenRouterAuto = String(env.OPENROUTER_IMAGE_ALLOW_PAID_AUTO || "") === "1";
-    const openrouter = all.filter((p) =>
-      p.openrouter && openrouterAuto && (isFreeOpenRouterModel(p.model) || allowPaidOpenRouterAuto)
-    );
     const rest = all.filter((p) =>
       !p.binding && !p.gemini && !p.openrouter && (p.custom || keys.length > 0)
     );
@@ -954,9 +950,7 @@ export async function generateImage(prompt, env, options = {}) {
       return [...arr.slice(off), ...arr.slice(0, off)];
     };
 
-    // OpenRouter первым: он сам ищет рабочую бесплатную image-модель.
-    // Если за лимит времени не нашёл — обычный цикл пойдёт дальше к Cloudflare.
-    queue = [...openrouter, ...cf, ...shuffle(rest)];
+    queue = [...cf, ...shuffle(rest)];
   }
 
   const attempts = [];
@@ -969,7 +963,7 @@ export async function generateImage(prompt, env, options = {}) {
         ok: false,
         status: 0,
         latency: 0,
-        error: "В авто-режиме нет доступных провайдеров. Для OpenRouter нужны OPENROUTER_API_KEY и free-модель (:free или openrouter/free).", 
+        error: "В авто-режиме нет доступных провайдеров. Включите Workers AI ([ai] в wrangler.toml), задайте NVIDIA_API_KEY или добавьте свой IMAGE_PROVIDERS_JSON.",
       }],
     };
   }
