@@ -30,11 +30,12 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `BOT_TOKEN`
 - `GOOGLE_API_KEY`
 - `NVIDIA_API_KEY`
-- `GEMINI_API_KEY` — опционально, Gemini Image для картинок и Gemini для более живых текстов
+- `GEMINI_API_KEY` — опционально, Gemini только для более живых текстов; в генерации картинок Gemini не показывается и не используется
 - `GEMINI_TEXT_MODEL` — опционально, первая Gemini-модель для текста; по умолчанию `gemini-3.5-flash`
 - `GEMINI_TEXT_MODELS` — опционально, список Gemini-моделей для текста через запятую/пробел; бот пробует их по очереди, затем встроенный список `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`
-- `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_MODELS` — опционально, первая/несколько Gemini-моделей для картинок; по умолчанию бот пробует `gemini-3.6`, затем `gemini-2.5-flash-image-preview` и `gemini-2.5-flash-image`; если Gemini сам подскажет `models/...` в ошибке, бот попробует эту модель следующей
-- `DISABLE_GEMINI_IMAGE=1` — полностью убрать Gemini из генерации картинок, оставив его для текста
+- `OPENROUTER_API_KEY` — опционально для генерации картинок через OpenRouter Image API; по умолчанию доступен только ручной выбор в `/models`, в авто-перебор добавляется только при `OPENROUTER_IMAGE_AUTO=1`
+- `OPENROUTER_IMAGE_MODEL` / `OPENROUTER_IMAGE_MODELS` — опционально, модель(и) OpenRouter для картинок; по умолчанию `bytedance-seed/seedream-4.5`
+- `OPENROUTER_IMAGE_RESOLUTION` / `OPENROUTER_IMAGE_QUALITY` — опционально, параметры OpenRouter Image API; по умолчанию `1K` и `auto`
 - `IMAGE_PINNED_FALLBACK=1` — разрешить старое поведение: если вручную выбранная модель картинок упала, пробовать остальные; по умолчанию ручной выбор строгий
 - `GEMINI_TEXT_FREE_REQUESTS_PER_DAY` / `GEMINI_IMAGE_FREE_REQUESTS_PER_DAY` — опционально, локальный дневной лимит запросов для `/usage` и предупреждений; если не заданы, используется консервативная оценка 50 запросов/день
 - `TEXT_API_KEY` / `NVIDIA_TEXT_API_KEY` — опционально для подписей и перевода промптов; для NVIDIA старый `meta/llama-3.3-70b-instruct` замените на `qwen/qwen3-next-80b-a3b-instruct`

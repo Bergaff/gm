@@ -918,7 +918,7 @@ export function modelsKeyboard(providers, current, stats = {}) {
   // и показываем лайки/дизлайки каждой прямо на кнопке.
   const rows = providers.map((p, i) => {
     const st = stats[p.id];
-    const score = st ? ` 👍${st.likes} 👎${st.dislikes}` : "";
+    const score = st ? ` 👍${st.likes} 👎${st.dislikes}${st.switchedFails ? ` ⚠${st.switchedFails}` : ""}` : "";
     return [{
       text: `${p.id === current ? "✅ " : ""}Модель ${i + 1}${score}`,
       callback_data: `s|model|${p.id}`,
@@ -940,6 +940,7 @@ export function modelsText(providers, current, stats, keyCount) {
     "🤖 <b>Модели генерации</b>",
     "",
     `Ключей NVIDIA загружено: <b>${keyCount}</b>`,
+    `OpenRouter: <b>${providers.some((p) => p.openrouter) ? "подключён" : "нет ключа"}</b>`,
     `Доступно моделей: <b>${providers.length}</b>`,
     "",
   ];
@@ -951,7 +952,9 @@ export function modelsText(providers, current, stats, keyCount) {
     if (st) {
       const total = st.likes + st.dislikes;
       const rate = total ? Math.round((st.likes / total) * 100) + "%" : "—";
-      lines.push(`   постов ${st.posts} · 👍 ${st.likes} · 👎 ${st.dislikes} · рейтинг ${rate}`);
+      const fail = st.apiFails ? ` · сбоев ${st.apiFails}` : "";
+      const switched = st.switchedFails ? ` · автопереходов ${st.switchedFails}` : "";
+      lines.push(`   постов ${st.posts} · 👍 ${st.likes} · 👎 ${st.dislikes} · рейтинг ${rate}${fail}${switched}`);
     } else {
       lines.push("   <i>ещё не использовалась</i>");
     }

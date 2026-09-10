@@ -92,36 +92,46 @@ async function byModel(chatId, days, env) {
      GROUP BY p.provider ORDER BY likes DESC, posts DESC`
   ).bind(from).all();
 
-  if (!results.length) return sendMessage(chatId, "Данных пока нет.", env);
-
   const header =
     padEnd("модель", 16) + padEnd("шт", 5) + padEnd("+", 5) +
     padEnd("-", 5) + padEnd("рейт", 7) + "мс";
 
-  const lines = results.map((r) => {
+  const lines = results.length ? results.map((r) => {
     const total = r.likes + r.dislikes;
     const rating = total ? Math.round((r.likes / total) * 100) + "%" : "—";
     return padEnd(r.provider, 16) + padEnd(r.posts, 5) + padEnd(r.likes, 5) +
            padEnd(r.dislikes, 5) + padEnd(rating, 7) + (r.latency ?? "—");
-  });
+  }) : ["успешных постов нет"];
 
   const reliability = await env.DB.prepare(
-    `SELECT provider, SUM(ok) AS success, COUNT(*) AS calls
-     FROM gen_log WHERE created_at >= ?
-     GROUP BY provider ORDER BY calls DESC`
+    `SELECT g.provider,
+            SUM(g.ok) AS success,
+            SUM(CASE WHEN g.ok = 0 THEN 1 ELSE 0 END) AS fails,
+            SUM(CASE WHEN g.ok = 0 AND EXISTS (
+              SELECT 1 FROM gen_log h
+              WHERE h.chat_id = g.chat_id
+                AND h.created_at = g.created_at
+                AND h.ok = 1
+            ) THEN 1 ELSE 0 END) AS switched,
+            COUNT(*) AS calls
+     FROM gen_log g WHERE g.created_at >= ?
+     GROUP BY g.provider ORDER BY calls DESC`
   ).bind(new Date(Date.now() - days * 86400000).toISOString()).all();
 
-  const relLines = reliability.results.map(
-    (r) => padEnd(r.provider, 16) + padEnd(`${r.success}/${r.calls}`, 10) +
-           `${Math.round((r.success / r.calls) * 100)}%`
-  );
+  const relLines = reliability.results.length ? reliability.results.map(
+    (r) => padEnd(r.provider, 16) + padEnd(r.calls, 6) +
+           padEnd(r.success, 6) + padEnd(r.fails, 6) +
+           padEnd(r.switched, 8) + `${Math.round((r.success / r.calls) * 100)}%`
+  ) : ["попыток генерации нет"];
 
   return sendMessage(
     chatId,
     `🤖 <b>Рейтинг моделей за ${days} дн.</b>\n\n` +
       `<pre>${escapeHtml([header, ...lines].join("\n"))}</pre>\n` +
-      `<b>Надёжность API</b>\n<pre>${escapeHtml(
-        [padEnd("модель", 16) + padEnd("успех", 10) + "%", ...relLines].join("\n")
+      `<b>Надёжность API</b>\n` +
+      `<i>перекл. = модель не сработала, и бот автоматически ушёл к следующей</i>\n` +
+      `<pre>${escapeHtml(
+        [padEnd("модель", 16) + padEnd("выз", 6) + padEnd("ок", 6) + padEnd("сбой", 6) + padEnd("перекл", 8) + "%", ...relLines].join("\n")
       )}</pre>`,
     env
   );

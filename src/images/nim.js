@@ -175,18 +175,19 @@ function fillTemplate(node, prompt, seed) {
   return node;
 }
 
-// Встроенные NVIDIA + добавленные пользователем
+// Встроенные Cloudflare/NVIDIA/OpenRouter + добавленные пользователем
 export function getAllProviders(env) {
-  // Порядок = приоритет: Gemini (лучшее качество, свой бесплатный лимит),
-  // затем Cloudflare (бесплатно), затем NVIDIA и свои провайдеры.
+  // Порядок = приоритет: Cloudflare (бесплатно), затем NVIDIA,
+  // затем OpenRouter и пользовательские API. Gemini для картинок скрыт:
+  // по просьбе пользователя Gemini оставляем только для текста.
   // disabled — модели, отключённые по качеству. Секрет SHOW_ALL_MODELS=1
   // возвращает их обратно, если понадобится сравнить.
   const showAll = env && String(env.SHOW_ALL_MODELS || "") === "1";
 
   return [
-    ...getGeminiProviders(env),
     ...getCfProviders(env),
     ...NIM_PROVIDERS,
+    ...getOpenRouterProviders(env),
     ...getCustomProviders(env),
   ].filter((p) => showAll || !p.disabled);
 }
@@ -332,9 +333,58 @@ function geminiImageProvider(model, index) {
 export const GEMINI_PROVIDERS = [];
 
 function getGeminiProviders(env) {
-  if (!env || !env.GEMINI_API_KEY) return [];
-  if (String(env.DISABLE_GEMINI_IMAGE || "") === "1") return [];
-  return getGeminiImageModels(env).map((model, index) => geminiImageProvider(model, index));
+  // Gemini используется только для текстовых подписей. Для картинок он не
+  // показывается в /models и не участвует в auto/fallback, чтобы случайно не
+  // тратить квоту/деньги и не путать его с Cloudflare-моделями.
+  return [];
+}
+
+const DEFAULT_OPENROUTER_IMAGE_MODEL = "bytedance-seed/seedream-4.5";
+
+export function getOpenRouterImageModels(env) {
+  const raw = env?.OPENROUTER_IMAGE_MODELS || env?.OPENROUTER_IMAGE_MODEL || "";
+  const configured = String(raw)
+    .split(/[,\s]+/)
+    .map((m) => m.trim())
+    .filter(Boolean);
+  return [...new Set([...configured, DEFAULT_OPENROUTER_IMAGE_MODEL])];
+}
+
+function openRouterTitle(model) {
+  if (model.includes("seedream")) return "OpenRouter Seedream Image";
+  if (model.includes("gemini")) return "OpenRouter Gemini Image";
+  if (model.includes("gpt-image")) return "OpenRouter GPT Image";
+  return "OpenRouter Image";
+}
+
+function openRouterProvider(model, index, env) {
+  const resolution = String(env?.OPENROUTER_IMAGE_RESOLUTION || "1K");
+  const quality = String(env?.OPENROUTER_IMAGE_QUALITY || "auto");
+  return {
+    id: index === 0 ? "openrouter-image" : `openrouter-image-${model.replace(/[^a-z0-9]+/gi, "-")}`,
+    title: `${openRouterTitle(model)} — ${model}`,
+    openrouter: true,
+    model,
+    url: "https://openrouter.ai/api/v1/images",
+    keyEnv: "OPENROUTER_API_KEY",
+    build: (prompt, seed, negative) => ({
+      model,
+      prompt: [
+        `Create exactly this safe-for-work image: ${prompt}`,
+        "The requested subject and action are mandatory; do not replace them with a generic morning scene.",
+        negative ? `Avoid: ${negative}.` : "",
+      ].filter(Boolean).join("\n"),
+      aspect_ratio: "1:1",
+      resolution,
+      quality,
+      output_format: "png",
+    }),
+  };
+}
+
+function getOpenRouterProviders(env) {
+  if (!env?.OPENROUTER_API_KEY) return [];
+  return getOpenRouterImageModels(env).map((model, index) => openRouterProvider(model, index, env));
 }
 
 
@@ -439,6 +489,52 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
     };
   }
 
+
+  // OpenRouter Image API — отдельный ключ и отдельный endpoint /api/v1/images.
+  if (provider.openrouter) {
+    const key = env[provider.keyEnv || "OPENROUTER_API_KEY"];
+    if (!key) {
+      return { ok: false, status: 0, latency: 0,
+               error: `Не задан секрет ${provider.keyEnv || "OPENROUTER_API_KEY"}` };
+    }
+
+    const headers = {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = String(env.OPENROUTER_SITE_URL);
+    if (env.OPENROUTER_APP_NAME) headers["X-Title"] = String(env.OPENROUTER_APP_NAME);
+
+    const response = await fetch(provider.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(provider.build(prompt, seed, negative)),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+
+    const latency = Date.now() - started;
+    if (!response.ok) {
+      const body = await response.text();
+      return { ok: false, status: response.status, latency, error: body.slice(0, 300) };
+    }
+
+    const payload = await response.json();
+    const base64 = extractBase64(payload);
+    if (base64) {
+      return { ok: true, status: 200, latency, bytes: base64ToBytes(base64), seed };
+    }
+    const url = extractUrl(payload);
+    if (url) {
+      const imageResponse = await fetch(url);
+      if (imageResponse.ok) {
+        return { ok: true, status: 200, latency: Date.now() - started,
+                 bytes: new Uint8Array(await imageResponse.arrayBuffer()), seed };
+      }
+    }
+    return { ok: false, status: response.status, latency,
+             error: "OpenRouter: нет изображения в ответе: " + JSON.stringify(payload).slice(0, 200) };
+  }
 
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
   if (provider.binding) {
@@ -583,7 +679,7 @@ export async function generateImage(prompt, env, options = {}) {
 
   const keys = getApiKeys(env);
   const hasCustom = getCustomProviders(env).length > 0 ||
-    getCfProviders(env).length > 0 || getGeminiProviders(env).length > 0;
+    getCfProviders(env).length > 0 || getOpenRouterProviders(env).length > 0;
 
   // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
   if (!keys.length && !hasCustom) {
@@ -624,17 +720,21 @@ export async function generateImage(prompt, env, options = {}) {
       queue = [pinned];
     }
   } else {
-    // ПРИОРИТЕТ: если есть GEMINI_API_KEY — сначала Gemini Image, чтобы
-    // /test показывал именно связку Gemini текст + Gemini картинка.
-    // Остальные провайдеры не скрываем: они остаются в /models и fallback.
-    // Потом Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
+    // ПРИОРИТЕТ: Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
+    // OpenRouter может быть платным, поэтому в авто-перебор попадает только
+    // при явном OPENROUTER_IMAGE_AUTO=1; вручную выбрать его в /models можно.
     const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
-    const gemini = all.filter((p) => p.gemini);
     const cf = getCfProviders(env)
       .slice()
       .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
 
-    const rest = all.filter((p) => !p.binding && !p.gemini);
+    const openrouterAuto = String(env.OPENROUTER_IMAGE_AUTO || "") === "1";
+    const rest = all.filter((p) =>
+      !p.binding &&
+      !p.gemini &&
+      (p.custom || p.openrouter || keys.length > 0) &&
+      (!p.openrouter || openrouterAuto)
+    );
 
     const shuffle = (arr) => {
       if (!arr.length) return [];
@@ -642,10 +742,23 @@ export async function generateImage(prompt, env, options = {}) {
       return [...arr.slice(off), ...arr.slice(0, off)];
     };
 
-    queue = [...gemini, ...cf, ...shuffle(rest)];
+    queue = [...cf, ...shuffle(rest)];
   }
 
   const attempts = [];
+
+  if (!queue.length) {
+    return {
+      ok: false,
+      attempts: [{
+        provider: "-",
+        ok: false,
+        status: 0,
+        latency: 0,
+        error: "В авто-режиме нет бесплатных/разрешённых провайдеров. Выберите OpenRouter вручную в /models или включите OPENROUTER_IMAGE_AUTO=1.",
+      }],
+    };
+  }
 
   for (const provider of queue) {
     // Закреплённую вручную модель пробуем всегда, даже после сбоя.

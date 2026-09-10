@@ -139,5 +139,36 @@ export async function votesByProvider(env, chatId = null) {
   for (const r of results || []) {
     if (r.provider) map[r.provider] = r;
   }
+
+  // Статистика неудачных попыток: когда модель вернула ошибку/брак, а бот
+  // автоматически пошёл к следующей модели. Группируем по chat_id+created_at,
+  // потому что logAttempts пишет все попытки одной генерации одним timestamp.
+  try {
+    const failWhere = chatId ? "WHERE g.chat_id = ?" : "";
+    const failStmt = env.DB.prepare(
+      `SELECT g.provider,
+              COUNT(*) AS apiFails,
+              SUM(CASE WHEN EXISTS (
+                SELECT 1 FROM gen_log h
+                WHERE h.chat_id = g.chat_id
+                  AND h.created_at = g.created_at
+                  AND h.ok = 1
+              ) THEN 1 ELSE 0 END) AS switchedFails
+       FROM gen_log g
+       ${failWhere}
+       ${failWhere ? "AND" : "WHERE"} g.ok = 0
+       GROUP BY g.provider`
+    );
+    const failRows = await (chatId ? failStmt.bind(chatId) : failStmt).all();
+    for (const r of failRows.results || []) {
+      if (!r.provider) continue;
+      map[r.provider] = map[r.provider] || { provider: r.provider, posts: 0, likes: 0, dislikes: 0 };
+      map[r.provider].apiFails = Number(r.apiFails || 0);
+      map[r.provider].switchedFails = Number(r.switchedFails || 0);
+    }
+  } catch {
+    // старые базы/локальная диагностика не должны ломать /models
+  }
+
   return map;
 }
