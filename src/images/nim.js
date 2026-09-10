@@ -386,7 +386,7 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
 
     if (inline) {
       // У Gemini свой лимит (не нейроны) — считаем запросы отдельно.
-      await addUsage(env, 0, "gemini");
+      await addUsage(env, 0, "gemini_image");
       return { ok: true, status: 200, latency, bytes: base64ToBytes(inline), seed };
     }
 

@@ -2370,7 +2370,7 @@ function helpText(role) {
       "/stats_post &lt;id&gt;",
       "/stats_errors [N]",
       "/nim_health",
-      "/usage — остаток лимита Cloudflare",
+      "/usage — остаток лимита Cloudflare и счётчик Gemini",
       "/change — модели во всех чатах, смена кнопками",
       "/examples — общие примеры подписей (.txt файлом)",
       "/examples_clear — удалить примеры",

@@ -8,6 +8,12 @@
 // Тарифы: https://developers.cloudflare.com/workers-ai/platform/pricing/
 
 export const FREE_NEURONS_PER_DAY = 10000;
+export const DEFAULT_GEMINI_REQUESTS_PER_DAY = 50;
+
+function numEnv(env, name, fallback = 0) {
+  const n = Number(env?.[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 // Ключ по дате UTC — лимит сбрасывается в 00:00 UTC
 function dayKey(offsetDays = 0) {
@@ -54,13 +60,14 @@ export async function addUsage(env, neurons, kind = "other") {
   // и мы считаем их запросы, а не нейроны. Раньше нулевой расход
   // отсекался этой проверкой, и счётчики оставались пустыми.
   if (!env?.BOT_KV) return;
-  if (!neurons && kind !== "gemini" && kind !== "nvidia") return;
+  const requestKinds = new Set(["gemini", "gemini_text", "gemini_image", "nvidia"]);
+  if (!neurons && !requestKinds.has(kind)) return;
   if (neurons < 0) return;
 
   try {
     const key = dayKey();
     const cur = (await env.BOT_KV.get(key, "json")) ||
-      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
+      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
 
     cur.total += neurons;
     cur.calls += 1;
@@ -70,6 +77,14 @@ export async function addUsage(env, neurons, kind = "other") {
     if (kind === "image") cur.image += neurons;
     else if (kind === "text") cur.text += neurons;
     else if (kind === "gemini") cur.gemini = (cur.gemini || 0) + 1;
+    else if (kind === "gemini_text") {
+      cur.gemini = (cur.gemini || 0) + 1;
+      cur.geminiText = (cur.geminiText || 0) + 1;
+    }
+    else if (kind === "gemini_image") {
+      cur.gemini = (cur.gemini || 0) + 1;
+      cur.geminiImage = (cur.geminiImage || 0) + 1;
+    }
     else if (kind === "nvidia") cur.nvidia = (cur.nvidia || 0) + 1;
 
     // Держим 8 дней, чтобы показывать историю за неделю
@@ -82,9 +97,9 @@ export async function addUsage(env, neurons, kind = "other") {
 export async function getUsage(env, offsetDays = 0) {
   try {
     const data = await env.BOT_KV.get(dayKey(offsetDays), "json");
-    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
+    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
   } catch {
-    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, nvidia: 0 };
+    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0 };
   }
 }
 
@@ -122,13 +137,9 @@ function bar(percent, width = 20) {
  * Показывает расход за сегодня, остаток и историю.
  */
 export async function usageText(env, escapeHtml) {
-  if (!env.AI) {
-    return (
-      "⚠️ <b>Workers AI не подключён</b>\n\n" +
-      "Добавьте в <code>wrangler.toml</code>:\n" +
-      "<code>[ai]\nbinding = \"AI\"</code>"
-    );
-  }
+  const aiWarning = !env.AI
+    ? "⚠️ Workers AI не подключён: Cloudflare-нейроны будут нулевые."
+    : "";
 
   const today = await getUsage(env);
   const used = Math.round(today.total);
@@ -139,6 +150,15 @@ export async function usageText(env, escapeHtml) {
   // Сколько ещё постов влезет: картинка FLUX + подпись ≈ 72 нейрона
   const perPost = 72;
   const postsLeft = Math.floor(left / perPost);
+
+  const geminiTextLimit = numEnv(env, "GEMINI_TEXT_FREE_REQUESTS_PER_DAY",
+    numEnv(env, "GEMINI_FREE_REQUESTS_PER_DAY", DEFAULT_GEMINI_REQUESTS_PER_DAY));
+  const geminiImageLimit = numEnv(env, "GEMINI_IMAGE_FREE_REQUESTS_PER_DAY",
+    numEnv(env, "GEMINI_FREE_REQUESTS_PER_DAY", DEFAULT_GEMINI_REQUESTS_PER_DAY));
+  const geminiText = today.geminiText || 0;
+  const geminiImage = today.geminiImage || 0;
+  const geminiTextPct = Math.min(100, (geminiText / geminiTextLimit) * 100);
+  const geminiImagePct = Math.min(100, (geminiImage / geminiImageLimit) * 100);
 
   const lines = [
     "⚡ <b>Расход Cloudflare Workers AI</b>",
@@ -156,11 +176,16 @@ export async function usageText(env, escapeHtml) {
     `💬 текст: ${Math.round(today.text)} нейронов`,
     `📞 вызовов: ${today.calls}`,
     "",
+    "<b>Gemini сегодня</b>",
+    `💬 текст: ${geminiText}/${geminiTextLimit} запросов (${geminiTextPct.toFixed(0)}%)`,
+    `<code>${bar(geminiTextPct)}</code>`,
+    `🖼 картинки: ${geminiImage}/${geminiImageLimit} запросов (${geminiImagePct.toFixed(0)}%)`,
+    `<code>${bar(geminiImagePct)}</code>`,
+    `📞 всего Gemini: ${today.gemini || 0} запросов`,
+    "",
     "<b>Другие провайдеры</b>",
-    `🍌 Gemini: ${today.gemini || 0} запросов` +
-      (today.gemini ? " (картинки/текст, свой бесплатный лимит)" : ""),
-    `🟢 NVIDIA: ${today.nvidia || 0} картинок` +
-      (today.nvidia ? " (расход кредитов)" : ""),
+    `🟢 NVIDIA: ${today.nvidia || 0} запросов` +
+      (today.nvidia ? " (свой лимит/кредиты)" : ""),
   ];
 
   const history = await getUsageHistory(env, 7);
@@ -180,11 +205,24 @@ export async function usageText(env, escapeHtml) {
     "<i>Точные цифры — в дашборде Workers AI.</i>"
   );
 
+  if (aiWarning) lines.push("", aiWarning);
+
   if (percent >= 90) {
-    lines.push("", "🔴 <b>Лимит почти исчерпан</b> — бот перейдёт на NVIDIA.");
+    lines.push("", "🔴 <b>Лимит Cloudflare почти исчерпан</b> — бот перейдёт на запасные варианты.");
   } else if (percent >= 70) {
-    lines.push("", "🟡 Израсходовано больше 70%.");
+    lines.push("", "🟡 Cloudflare: израсходовано больше 70%.");
   }
+
+  if (geminiTextPct >= 90 || geminiImagePct >= 90) {
+    lines.push("", "🔴 <b>Gemini близко к дневному лимиту</b> — стоит меньше гонять /test или поднять лимит в переменных.");
+  } else if (geminiTextPct >= 70 || geminiImagePct >= 70) {
+    lines.push("", "🟡 Gemini: израсходовано больше 70% от локального дневного лимита.");
+  }
+
+  lines.push(
+    "",
+    `<i>Лимит Gemini считается локально по запросам. Если у вашего аккаунта другой free tier, задайте <code>GEMINI_TEXT_FREE_REQUESTS_PER_DAY</code> и/или <code>GEMINI_IMAGE_FREE_REQUESTS_PER_DAY</code>.</i>`
+  );
 
   return lines.join("\n");
 }
