@@ -574,19 +574,17 @@ export async function generateImage(prompt, env, options = {}) {
       ? [pinned]
       : [pinned, ...all.filter((p) => p.id !== pinned.id)];
   } else {
-    // ПРИОРИТЕТ: сначала бесплатный Cloudflare (в случайном порядке между
-    // своими моделями), и только если ВСЕ они не сработали — платные NVIDIA
-    // и добавленные провайдеры. Раньше очередь тасовалась целиком, и первым
-    // мог оказаться NVIDIA, зря тративший кредиты.
-    // Бесплатные CF-модели идут в порядке КАЧЕСТВА, а не случайно.
-    // Раньше очередь тасовалась, и чаще всего выигрывал самый слабый
-    // SDXL-Lightning — по голосам в /models у него был рейтинг 0%.
+    // ПРИОРИТЕТ: если есть GEMINI_API_KEY — сначала Gemini Image, чтобы
+    // /test показывал именно связку Gemini текст + Gemini картинка.
+    // Остальные провайдеры не скрываем: они остаются в /models и fallback.
+    // Потом Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
     const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
+    const gemini = all.filter((p) => p.gemini);
     const cf = getCfProviders(env)
       .slice()
       .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
 
-    const rest = all.filter((p) => !p.binding);
+    const rest = all.filter((p) => !p.binding && !p.gemini);
 
     const shuffle = (arr) => {
       if (!arr.length) return [];
@@ -594,7 +592,7 @@ export async function generateImage(prompt, env, options = {}) {
       return [...arr.slice(off), ...arr.slice(0, off)];
     };
 
-    queue = [...cf, ...shuffle(rest)];
+    queue = [...gemini, ...cf, ...shuffle(rest)];
   }
 
   const attempts = [];

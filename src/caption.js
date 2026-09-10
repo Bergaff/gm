@@ -154,7 +154,12 @@ export function getTextApiKeys(env) {
   const unique = [...new Set(keys.filter(Boolean))];
   if (unique.length) return unique;
 
-  return getApiKeys(env); // запасной вариант — ключи для картинок
+  // Если есть Gemini, текст должен идти через него, а не случайно через
+  // NVIDIA-ключи для картинок. Иначе при сбое Gemini бот пробовал image-key
+  // на integrate.api.nvidia.com и показывал непонятные 404/410 от LLM.
+  if (env.GEMINI_API_KEY) return [];
+
+  return getApiKeys(env); // запасной вариант — только для старых установок без Gemini
 }
 
 // Задан ли отдельный ключ под текст (для /diag)
@@ -429,6 +434,7 @@ export async function generateCaption(env, options = {}) {
     birthdays = [],
     captionTraits = [],
     recentCaptions = [],
+    textProvider = "gemini",
   } = options;
 
   const keys = getTextApiKeys(env);
@@ -447,11 +453,13 @@ export async function generateCaption(env, options = {}) {
     recentCaptions
   );
   let lastError = null;
+  let geminiError = null;
 
-  // ПРИОРИТЕТ: Gemini 2.5 Flash (если есть GEMINI_API_KEY) — обычно заметно
-  // лучше понимает русский стиль чата, чем бесплатная Llama 8B в Workers AI.
-  // Потом — внешний OpenAI-compatible API, потом Cloudflare как fallback.
-  if (env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
+  const mode = String(textProvider || "gemini").toLowerCase();
+
+  // ПРИОРИТЕТ: Gemini 2.5 Flash (если есть GEMINI_API_KEY) — сейчас это
+  // основной путь для текста. Остальные API не скрыты и остаются fallback.
+  if (mode !== "external" && mode !== "cf" && env.GEMINI_API_KEY && String(env.DISABLE_GEMINI_TEXT || "") !== "1") {
     try {
       const text = cleanup(await generateViaGemini(env, messages));
       const problem = captionProblem(text);
@@ -459,9 +467,11 @@ export async function generateCaption(env, options = {}) {
         return { ok: true, text, model: "gemini/" + getGeminiTextModel(env),
                  latency: Date.now() - started };
       }
-      lastError = problem ? `Gemini выдал брак (${problem})` : "Gemini вернул пустой ответ";
+      geminiError = problem ? `Gemini выдал брак (${problem})` : "Gemini вернул пустой ответ";
+      lastError = geminiError;
     } catch (e) {
-      lastError = String(e?.message || e).slice(0, 180);
+      geminiError = String(e?.message || e).slice(0, 180);
+      lastError = geminiError;
     }
   }
 
@@ -485,7 +495,7 @@ export async function generateCaption(env, options = {}) {
     // не получилось — идём во внешние ключи ниже
   }
 
-  if (!keys.length) {
+  if (mode === "cf" || mode === "gemini" || !keys.length) {
     if (env.AI) {
       try {
         const text = cleanup(await generateViaCfBinding(env, messages));
@@ -580,7 +590,13 @@ export async function generateCaption(env, options = {}) {
     }
   }
 
-  return { ok: false, error: lastError || "все ключи не сработали", latency: Date.now() - started };
+  return {
+    ok: false,
+    error: geminiError && lastError && lastError !== geminiError
+      ? `${geminiError}; fallback: ${lastError}`
+      : lastError || "все ключи не сработали",
+    latency: Date.now() - started,
+  };
 }
 
 

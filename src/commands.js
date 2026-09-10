@@ -147,6 +147,15 @@ function parseCaptionTraits(text) {
     .map((x) => x.slice(0, 80));
 }
 
+function textProviderLabel(value) {
+  return {
+    gemini: "Gemini 2.5 Flash",
+    auto: "авто (Gemini → внешний API → Cloudflare)",
+    external: "внешний OpenAI-compatible API",
+    cf: "Cloudflare Workers AI",
+  }[value] || value || "gemini";
+}
+
 function captionTraitsLabel(traits) {
   const list = Array.isArray(traits) ? traits.filter(Boolean) : [];
   return list.length ? list.join(", ") : "не заданы";
@@ -284,6 +293,7 @@ export function morningTestReport(result) {
           : "")
       : null,
     `Подпись: ${result.captionSource === "llm" ? "🤖 сгенерирована" : "📄 шаблон"}`,
+    result.captionModel ? `Модель текста: <b>${escapeHtml(result.captionModel)}</b>` : null,
     result.captionError
       ? `⚠️ LLM не ответил: <code>${escapeHtml(String(result.captionError).slice(0, 200))}</code>`
       : null,
@@ -354,6 +364,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     text = `${text}\n\n${birthdayLine(birthdaysToday)}`;
   }
   let captionSource = "template";
+  let captionModel = null;
   let captionError = null;
 
   if (settings.aiCaptions) {
@@ -374,10 +385,12 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       birthdays: birthdaysToday,
       captionTraits: settings.captionTraits || [],
       recentCaptions,
+      textProvider: settings.textProvider || "gemini",
     });
     if (generated.ok) {
       text = generated.text;
       captionSource = "llm";
+      captionModel = generated.model || null;
     } else {
       // Раньше сбой глотался молча, и было непонятно, почему подписи
       // остаются шаблонными. Теперь причина видна в /test.
@@ -670,6 +683,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     promptOriginal: useNim && promptTranslated ? rawPrompt : null,
     promptTranslated,
     captionSource,
+    captionModel,
     captionError,
     styleApplied,
     styleId: styleUsed,
@@ -808,7 +822,7 @@ const KNOWN_COMMANDS = new Set([
   "/set_source", "/set_gdrive", "/refresh_gdrive", "/set_search",
   "/searches", "/add_search", "/del_search",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
-  "/models", "/set_model", "/set_timezone", "/style", "/caption_style",
+  "/models", "/set_model", "/set_text_provider", "/set_timezone", "/style", "/caption_style",
   "/birthday", "/birthdays", "/birthday_remove",
   "/holiday", "/holidays", "/holiday_remove",
   "/set_weekday_time", "/set_weekend_time",
@@ -1609,6 +1623,25 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
+    case "/set_text_provider": {
+      const allowed = ["gemini", "auto", "external", "cf"];
+      if (!value || !allowed.includes(value)) {
+        await sendMessage(
+          chatId,
+          "Использование: <code>/set_text_provider gemini|auto|external|cf</code>\n\n" +
+            "<b>gemini</b> — сейчас рекомендовано: текст через Gemini, fallback только Cloudflare.\n" +
+            "<b>auto</b> — Gemini → внешний API → Cloudflare.\n" +
+            "<b>external</b> — TEXT_API_URL/TEXT_API_KEY/TEXT_API_MODEL.\n" +
+            "<b>cf</b> — Cloudflare Workers AI.",
+          env
+        );
+        return;
+      }
+      await patchSettings(chatId, { textProvider: value, aiCaptions: true }, env);
+      await sendMessage(chatId, `✅ Провайдер текста: <b>${escapeHtml(textProviderLabel(value))}</b>. AI-подписи включены.`, env);
+      return;
+    }
+
     case "/ai_on":
     case "/ai_off": {
       const on = command === "/ai_on";
@@ -2000,8 +2033,9 @@ async function runDiagnostics(chatId, env) {
     lines.push("❌ NVIDIA текст: ключа нет (NVIDIA_TEXT_API_KEY)");
   }
   lines.push(env.GEMINI_API_KEY
-    ? `✅ Gemini текст: <code>${escapeHtml(getGeminiTextModel(env))}</code> — основной`
+    ? `✅ Gemini текст: <code>${escapeHtml(getGeminiTextModel(env))}</code>`
     : "➖ Gemini текст: нет GEMINI_API_KEY");
+  lines.push(`Режим текста в этом чате: <b>${escapeHtml(textProviderLabel(s.textProvider || "gemini"))}</b>`);
   lines.push(`OpenAI-compatible текст: <code>${escapeHtml(getTextModel(env))}</code>`);
   lines.push(`Характеристики подписей: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`);
 
@@ -2265,7 +2299,8 @@ function helpText(role) {
     "",
     "<b>Подписи к картинкам</b>",
     "/set_character — характер чата (текстом или .txt файлом)",
-    "/caption_style — короткие характеристики для AI-подписей", 
+    "/caption_style — короткие характеристики для AI-подписей",
+    "/set_text_provider gemini|auto|external|cf — выбрать API текста",
     "/ai_on, /ai_off — писать подписи нейросетью",
     "",
     "<b>Модели и расписание</b>",
@@ -2364,6 +2399,7 @@ function settingsText(s, chatId, role) {
     "",
     "<b>Подписи</b>",
     `AI-подписи: <b>${s.aiCaptions ? "включены 🤖" : "выключены"}</b>`,
+    `API текста: <b>${escapeHtml(textProviderLabel(s.textProvider || "gemini"))}</b>`,
     `Характер чата: <b>${s.character ? `${s.character.length} симв.` : "не задан"}</b>`,
     `Короткие характеристики: <b>${escapeHtml(captionTraitsLabel(s.captionTraits || []))}</b>`,
     "",

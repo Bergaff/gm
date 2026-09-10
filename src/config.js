@@ -38,6 +38,8 @@ export const DEFAULT_SETTINGS = {
   // Короткие характеристики чата для AI-подписей, по одной на строку:
   // «ироничные», «инженеры», «добрые», «любят мемы».
   captionTraits: [],
+  // auto | gemini | external | cf. По умолчанию — Gemini, если есть ключ.
+  textProvider: "gemini",
 
   // Кому в этом чате разрешено менять настройки: { "<userId>": {username, at} }
   grantedUsers: {},
