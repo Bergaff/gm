@@ -185,7 +185,9 @@ export function captionStylesText(settingsOrTraits = []) {
     "<b>Сейчас:</b>",
     traits.length ? traits.map((t) => `• ${escapeHtml(t)}`).join("\n") : "<i>не заданы</i>",
     "",
-    "Отправить список: <code>/caption_style</code>",
+    "Чтобы задать список, нажмите кнопку или отправьте <code>/caption_style</code>.",
+    "<b>Если бот ждёт ответ — ответьте именно на это сообщение.</b>",
+    "<i>/cancel — отмена</i>",
     "Очистить: <code>/caption_style clear</code>",
     "",
     "<i>Если развёрнутый характер не задан, бот будет брать манеру из общих примеров и перефразировать их.</i>",
@@ -851,23 +853,39 @@ const KNOWN_COMMANDS = new Set([
   "/change", "/examples", "/examples_clear",
 ]);
 
+export function replyToThisKeyboard(placeholder = "Ответьте на это сообщение") {
+  return {
+    force_reply: true,
+    selective: true,
+    input_field_placeholder: placeholder,
+  };
+}
+
+function waitHint(cancel = true) {
+  return "\n\n<b>Ответьте именно на это сообщение.</b>" +
+    (cancel ? "\n<i>/cancel — отмена</i>" : "");
+}
+
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
 const PENDING_PROMPTS = {
-  set_gdrive: "Пришлите ссылку на публичную папку Google Drive следующим сообщением.\n\n<i>/cancel — отмена</i>",
+  set_gdrive: "Пришлите ссылку на публичную папку Google Drive." + waitHint(),
   set_search:
     "Пришлите поисковый запрос для картинок.\n\n" +
     "<i>Пример: кот работяга</i>\n\n" +
     "⚠️ Поиск через Yandex/DuckDuckGo неофициальный: он может иногда не отдать картинку. " +
     "Поэтому лучше дополнительно настроить второй способ: Google Drive (/set_gdrive) " +
-    "или генерацию ИИ (/set_source nim).\n\n" +
-    "<i>/cancel — отмена</i>",
-  set_caption_traits: "Пришлите короткие характеристики чата, каждую с новой строки.\n\n<i>Например:</i>\n<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n<i>/cancel — отмена</i>",
-  add_search_weekday: "Пришлите поисковый запрос для <b>будней</b>.\n\n<i>Пример: кот работяга</i>\n<i>/cancel — отмена</i>",
-  add_search_weekend: "Пришлите поисковый запрос для <b>выходных</b>.\n\n<i>Пример: кот отдыхает с кофе</i>\n<i>/cancel — отмена</i>",
-  add_prompt_weekday: "Пришлите текст промпта для <b>будней</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
-  add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
-  set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>.\n\n<i>/cancel — отмена</i>",
-  set_weekend_time: "Пришлите время для выходных: <code>10:30</code> или диапазон <code>10:00-11:00</code>.\n\n<i>/cancel — отмена</i>",
+    "или генерацию ИИ (/set_source nim)." +
+    waitHint(),
+  set_caption_traits:
+    "Пришлите короткие характеристики чата, каждую с новой строки.\n\n" +
+    "<i>Например:</i>\n<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>" +
+    waitHint(),
+  add_search_weekday: "Пришлите поисковый запрос для <b>будней</b>.\n\n<i>Пример: кот работяга</i>" + waitHint(),
+  add_search_weekend: "Пришлите поисковый запрос для <b>выходных</b>.\n\n<i>Пример: кот отдыхает с кофе</i>" + waitHint(),
+  add_prompt_weekday: "Пришлите текст промпта для <b>будней</b>." + waitHint(),
+  add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b>." + waitHint(),
+  set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>." + waitHint(),
+  set_weekend_time: "Пришлите время для выходных: <code>10:30</code> или диапазон <code>10:00-11:00</code>." + waitHint(),
 };
 
 export function sourceKeyboard(current) {
@@ -1206,7 +1224,9 @@ export async function handleCommand(message, env, options = {}) {
       const list = await getExamples(env);
       // Помечаем ожидание: следующий .txt уйдёт в примеры, а не в характер.
       if (userId) await setPending(chatId, userId, "load_examples", env);
-      await sendMessage(chatId, examplesText(list, escapeHtml), env);
+      await sendMessage(chatId, examplesText(list, escapeHtml), env, {
+        reply_markup: replyToThisKeyboard("Прикрепите .txt с примерами"),
+      });
       return;
     }
     if (command === "/examples_clear") {
@@ -1357,7 +1377,9 @@ export async function handleCommand(message, env, options = {}) {
     case "/set_gdrive": {
       if (!value) {
         await setPending(chatId, userId, "set_gdrive", env);
-        await sendMessage(chatId, PENDING_PROMPTS.set_gdrive, env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_gdrive, env, {
+          reply_markup: replyToThisKeyboard("Ссылка на папку Google Drive"),
+        });
         return;
       }
       await applyGdrive(value, chatId, env);
@@ -1390,7 +1412,9 @@ export async function handleCommand(message, env, options = {}) {
     case "/set_search": {
       if (!value) {
         await setPending(chatId, userId, "set_search", env);
-        await sendMessage(chatId, PENDING_PROMPTS.set_search, env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_search, env, {
+          reply_markup: replyToThisKeyboard("Например: кот работяга"),
+        });
         return;
       }
       await applySearchQuery(value, chatId, env);
@@ -1413,7 +1437,9 @@ export async function handleCommand(message, env, options = {}) {
       }
       if (!body) {
         await setPending(chatId, userId, `add_search_${kind}`, env);
-        await sendMessage(chatId, PENDING_PROMPTS[`add_search_${kind}`], env);
+        await sendMessage(chatId, PENDING_PROMPTS[`add_search_${kind}`], env, {
+          reply_markup: replyToThisKeyboard("Например: кот работяга"),
+        });
         return;
       }
       await addSearchQuery(kind, body, chatId, env);
@@ -1464,7 +1490,9 @@ export async function handleCommand(message, env, options = {}) {
       // Раньше порог < 5 отклонял короткие, но осмысленные промпты («горы»).
       if (!body) {
         await setPending(chatId, userId, `add_prompt_${kind}`, env);
-        await sendMessage(chatId, PENDING_PROMPTS[`add_prompt_${kind}`], env);
+        await sendMessage(chatId, PENDING_PROMPTS[`add_prompt_${kind}`], env, {
+          reply_markup: replyToThisKeyboard("Текст промпта"),
+        });
         return;
       }
       await addPrompt(kind, body, chatId, env);
@@ -1498,8 +1526,9 @@ export async function handleCommand(message, env, options = {}) {
         await sendMessage(
           chatId,
           `✏️ Текущий текст промпта <b>${num}</b>:\n<code>${escapeHtml(cur)}</code>\n\n` +
-            "Пришлите новый текст следующим сообщением.\n\n<i>/cancel — отмена</i>",
-          env
+            "Пришлите новый текст.\n\n<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>",
+          env,
+          { reply_markup: replyToThisKeyboard("Новый текст промпта") }
         );
         return;
       }
@@ -1594,13 +1623,15 @@ export async function handleCommand(message, env, options = {}) {
             "",
             cur ? `Сейчас (${cur.length} симв.):\n<i>${escapeHtml(cur)}</i>` : "<i>Пока не задан.</i>",
             "",
-            "Пришлите описание следующим сообщением — или отправьте .txt файлом.",
+            "Пришлите описание ответом на это сообщение — или отправьте .txt файлом ответом на него.",
             "",
             "<i>Например: «Чат разработчиков, много шуток про дедлайны, неформальный тон».</i>",
             "",
+            "<b>Ответьте именно на это сообщение.</b>",
             "<i>/cancel — отмена</i>",
           ].join("\n"),
-          env
+          env,
+          { reply_markup: replyToThisKeyboard("Описание характера чата") }
         );
         return;
       }
@@ -1638,11 +1669,13 @@ export async function handleCommand(message, env, options = {}) {
       }
       const traits = parseCaptionTraits(value);
       if (!traits.length) {
-        await sendMessage(chatId, PENDING_PROMPTS.set_caption_traits, env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_caption_traits, env, {
+          reply_markup: replyToThisKeyboard("ироничные, инженеры, добрые"),
+        });
         return;
       }
       await patchSettings(chatId, { captionTraits: traits, aiCaptions: true }, env);
-      await sendMessage(chatId, `✅ Характеристики сохранены: <b>${escapeHtml(captionTraitsLabel(traits))}</b>. AI-подписи включены.`, env);
+      await sendMessage(chatId, `✅ Характеристики добавлены (${traits.length}). AI-подписи включены.`, env);
       return;
     }
 
@@ -1744,7 +1777,9 @@ export async function handleCommand(message, env, options = {}) {
 
       if (!value) {
         await setPending(chatId, userId, kind, env);
-        await sendMessage(chatId, PENDING_PROMPTS[kind], env);
+        await sendMessage(chatId, PENDING_PROMPTS[kind], env, {
+          reply_markup: replyToThisKeyboard(command === "/set_weekday_time" ? "09:00 или 09:00-09:40" : "10:30 или 10:00-11:00"),
+        });
         return;
       }
       if (!parseTimeSpec(value)) {
@@ -1904,9 +1939,7 @@ async function applyCaptionTraits(text, chatId, env) {
   await patchSettings(chatId, { captionTraits: traits, aiCaptions: true }, env);
   await sendMessage(
     chatId,
-    "✅ Характеристики для AI-подписей сохранены:\n" +
-      traits.map((t) => `• ${escapeHtml(t)}`).join("\n") +
-      "\n\n🤖 AI-подписи включены. Проверить: /test",
+    `✅ Характеристики добавлены (${traits.length}). AI-подписи включены.`,
     env
   );
 }

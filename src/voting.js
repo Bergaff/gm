@@ -25,6 +25,7 @@ import {
   morningTestReport,
   pickPrompt,
   holidayModeKeyboard,
+  replyToThisKeyboard,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -351,6 +352,8 @@ export async function handleCallback(query, env) {
             chatId,
             "🔎 Пришлите поисковый запрос для картинок.\n\n" +
               "<i>Пример: кот работяга</i>\n\n" +
+              "<b>Ответьте именно на это сообщение.</b>\n" +
+              "<i>/cancel — отмена</i>\n\n" +
               "⚠️ Поиск неофициальный и может иногда не сработать. " +
               "Сразу выберите второй способ, который бот попробует при сбое поиска:",
             env,
@@ -408,8 +411,10 @@ export async function handleCallback(query, env) {
           chatId,
           "Пришлите короткие характеристики чата, каждую с новой строки.\n\n" +
             "<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n" +
+            "<b>Ответьте именно на это сообщение.</b>\n" +
             "<i>/cancel — отмена</i>",
-          env
+          env,
+          { reply_markup: replyToThisKeyboard("ироничные, инженеры, добрые") }
         );
         return;
       }
@@ -456,8 +461,9 @@ export async function handleCallback(query, env) {
         await answerCallback(query.id, "Жду текст промпта", env);
         await sendMessage(
           chatId,
-          `Пришлите текст промпта для <b>${kind === "weekend" ? "выходных" : "будней"}</b> следующим сообщением.\n\n<i>/cancel — отмена</i>`,
-          env
+          `Пришлите текст промпта для <b>${kind === "weekend" ? "выходных" : "будней"}</b>.\n\n<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>`,
+          env,
+          { reply_markup: replyToThisKeyboard("Текст промпта") }
         );
         return;
       }
@@ -515,8 +521,9 @@ export async function handleCallback(query, env) {
         await sendMessage(
           chatId,
           `✏️ Текущий текст промпта <b>${idx + 1}</b>:\n<code>${cur}</code>\n\n` +
-            "Пришлите новый текст следующим сообщением.\n\n<i>/cancel — отмена</i>",
-          env
+            "Пришлите новый текст.\n\n<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>",
+          env,
+          { reply_markup: replyToThisKeyboard("Новый текст промпта") }
         );
         return;
       }

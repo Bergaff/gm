@@ -115,8 +115,9 @@ export function examplesText(list, escapeHtml) {
   if (!list.length) {
     lines.push("<i>Пока не загружены — подписи пишутся без образца.</i>");
     lines.push("");
-    lines.push("Пришлите <b>.txt</b> файл с удачными примерами:");
+    lines.push("Пришлите <b>.txt</b> файл с удачными примерами ответом на это сообщение:");
     lines.push("по одному на строку либо через пустую строку.");
+    lines.push("<i>/cancel — отмена</i>");
     lines.push("");
     lines.push("Примеры общие для всех чатов, но в каждом чате бот");
     lines.push("пишет своё — под характер именно той беседы.");
@@ -136,8 +137,8 @@ export function examplesText(list, escapeHtml) {
   }
 
   lines.push("");
-  lines.push("Заменить — пришлите новый .txt файл.");
-  lines.push("Удалить — /examples_clear");
+  lines.push("Заменить — пришлите новый .txt файл ответом на это сообщение.");
+  lines.push("Удалить — /examples_clear · /cancel — отмена");
 
   return lines.join("\n");
 }
