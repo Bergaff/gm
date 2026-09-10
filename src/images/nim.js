@@ -855,6 +855,98 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
   };
 }
 
+
+async function getAutoStats(env, chatId, days = 14) {
+  if (!env?.DB) return {};
+  const out = {};
+  const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+  const sinceDate = sinceIso.slice(0, 10);
+
+  try {
+    const where = chatId ? "WHERE p.chat_id = ? AND p.local_date >= ?" : "WHERE p.local_date >= ?";
+    const stmt = env.DB.prepare(
+      `SELECT p.provider,
+              COUNT(*) AS posts,
+              COALESCE(SUM(v.likes),0) AS likes,
+              COALESCE(SUM(v.dislikes),0) AS dislikes
+       FROM posts p
+       LEFT JOIN (
+         SELECT post_id,
+                SUM(CASE WHEN vote=1 THEN 1 ELSE 0 END) AS likes,
+                SUM(CASE WHEN vote=-1 THEN 1 ELSE 0 END) AS dislikes
+         FROM votes GROUP BY post_id
+       ) v ON v.post_id = p.id
+       ${where} AND p.provider IS NOT NULL
+       GROUP BY p.provider`
+    );
+    const rows = await (chatId ? stmt.bind(String(chatId), sinceDate) : stmt.bind(sinceDate)).all();
+    for (const r of rows.results || []) out[r.provider] = { ...out[r.provider], ...r };
+  } catch {}
+
+  try {
+    const where = chatId ? "WHERE chat_id = ? AND created_at >= ?" : "WHERE created_at >= ?";
+    const stmt = env.DB.prepare(
+      `SELECT provider,
+              COUNT(*) AS calls,
+              SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS fails
+       FROM gen_log
+       ${where}
+         AND COALESCE(error, '') NOT LIKE 'cooldown после%'
+       GROUP BY provider`
+    );
+    const rows = await (chatId ? stmt.bind(String(chatId), sinceIso) : stmt.bind(sinceIso)).all();
+    for (const r of rows.results || []) out[r.provider] = { ...out[r.provider], ...r };
+  } catch {}
+
+  return out;
+}
+
+function baseAutoPriority(provider) {
+  const id = provider.id;
+  if (id === "flux-dev") return 100;
+  if (id === "flux-schnell") return 85;
+  if (id === "cf-dreamshaper") return 70;
+  if (id === "cf-flux") return 45;
+  if (id === "sd3-medium") return 40;
+  if (provider.custom) return 60;
+  return 50;
+}
+
+function providerLooksBadForAuto(provider, stat = {}) {
+  const posts = Number(stat.posts || 0);
+  const likes = Number(stat.likes || 0);
+  const dislikes = Number(stat.dislikes || 0);
+  const votes = likes + dislikes;
+  const calls = Number(stat.calls || 0);
+  const fails = Number(stat.fails || 0);
+
+  // Если чат уже явно заминусовал модель, не ставим её первой в auto.
+  if (posts >= 8 && votes >= 3 && dislikes / Math.max(1, votes) >= 0.65) return true;
+  // Если API реально падает чаще половины попыток — тоже в конец/пропуск.
+  if (calls >= 8 && fails / Math.max(1, calls) >= 0.6) return true;
+  return false;
+}
+
+function rankAutoProviders(providers, stats = {}) {
+  const scored = providers.map((p, i) => {
+    const st = stats[p.id] || {};
+    const likes = Number(st.likes || 0);
+    const dislikes = Number(st.dislikes || 0);
+    const posts = Number(st.posts || 0);
+    const calls = Number(st.calls || 0);
+    const fails = Number(st.fails || 0);
+    const quality = likes * 8 - dislikes * 10;
+    const reliability = calls ? -Math.round((fails / calls) * 30) : 0;
+    const explored = posts ? 0 : 8; // новым моделям даём шанс, иначе они никогда не появятся в статистике
+    const bad = providerLooksBadForAuto(p, st);
+    return { p, i, bad, score: baseAutoPriority(p) + quality + reliability + explored };
+  });
+
+  const good = scored.filter((x) => !x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
+  const bad = scored.filter((x) => x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
+  return good.length ? [...good, ...bad] : bad;
+}
+
 async function isCoolingDown(id, env) {
   return Boolean(await env.BOT_KV.get(`nimfail:${id}`));
 }
@@ -933,24 +1025,15 @@ export async function generateImage(prompt, env, options = {}) {
       queue = [pinned];
     }
   } else {
-    // ПРИОРИТЕТ: Cloudflare (бесплатно), затем NVIDIA и пользовательские API.
-    // OpenRouter для картинок скрыт и в auto не участвует.
-    const CF_QUALITY = ["cf-flux", "cf-dreamshaper", "cf-sdxl"];
-    const cf = getCfProviders(env)
-      .slice()
-      .sort((a, b) => CF_QUALITY.indexOf(a.id) - CF_QUALITY.indexOf(b.id));
-
-    const rest = all.filter((p) =>
-      !p.binding && !p.gemini && !p.openrouter && (p.custom || keys.length > 0)
+    // Auto больше не ставит Cloudflare первым просто потому, что он бесплатный.
+    // Это ухудшало качество: CF успевал вернуть картинку, и до NVIDIA-моделей
+    // очередь не доходила. Теперь порядок адаптивный: новые/качественные модели
+    // получают шанс, а модели с большим числом дизлайков/сбоев уходят в конец.
+    const candidates = all.filter((p) =>
+      !p.gemini && !p.openrouter && (p.binding || p.custom || keys.length > 0)
     );
-
-    const shuffle = (arr) => {
-      if (!arr.length) return [];
-      const off = Math.floor(Math.random() * arr.length);
-      return [...arr.slice(off), ...arr.slice(0, off)];
-    };
-
-    queue = [...cf, ...shuffle(rest)];
+    const stats = await getAutoStats(env, chatId);
+    queue = rankAutoProviders(candidates, stats);
   }
 
   const attempts = [];
