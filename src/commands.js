@@ -818,6 +818,10 @@ export function changeModelsText(env, title, current) {
         return i >= 0 ? `${i + 1}. ${providers[i].title}` : current;
       })() + "</b>");
 
+  if (current !== "auto") {
+    lines.push("<i>Ручной выбор строгий: без тихой подмены на другую модель.</i>");
+  }
+
   lines.push("");
   providers.forEach((p, i) => {
     lines.push(`${p.id === current ? "✅ " : ""}<b>${i + 1}.</b> ${p.title}`);
@@ -957,6 +961,9 @@ export function modelsText(providers, current, stats, keyCount) {
   lines.push(current === "auto"
     ? "Сейчас: <b>Авто</b> — перебор всех с запасным вариантом"
     : `Сейчас: <b>${escapeHtml(getProviderTitle(providers, current))}</b>`);
+  if (current !== "auto") {
+    lines.push("<i>Ручной выбор строгий: бот не будет молча заменять эту модель на Cloudflare/NVIDIA. Для перебора всех используйте Авто.</i>");
+  }
 
   return lines.join("\n");
 }

@@ -333,6 +333,7 @@ export const GEMINI_PROVIDERS = [];
 
 function getGeminiProviders(env) {
   if (!env || !env.GEMINI_API_KEY) return [];
+  if (String(env.DISABLE_GEMINI_IMAGE || "") === "1") return [];
   return getGeminiImageModels(env).map((model, index) => geminiImageProvider(model, index));
 }
 
@@ -606,11 +607,22 @@ export async function generateImage(prompt, env, options = {}) {
   if (preferred !== "auto" && getProvider(preferred, env)) {
     const pinned = getProvider(preferred, env);
     pinnedId = pinned.id;
-    // noFallback: только запрошенная модель (нужно для /nim_health,
-    // иначе перебор всех моделей упирается в лимит субреквестов).
-    queue = noFallback
-      ? [pinned]
-      : [pinned, ...all.filter((p) => p.id !== pinned.id)];
+
+    // Если человек выбрал конкретную модель, не подменяем её молча другой.
+    // Раньше выбранный Gemini падал, после чего бот доходил до Cloudflare
+    // DreamShaper — в отчёте выглядело так, будто «Gemini использует
+    // DreamShaper». Теперь ручной выбор означает строгий выбор.
+    // Исключение: для Gemini можно перебрать только другие Gemini-image id
+    // из GEMINI_IMAGE_MODELS, но не уходить в Cloudflare/NVIDIA.
+    if (noFallback) {
+      queue = [pinned];
+    } else if (pinned.gemini) {
+      queue = [pinned, ...all.filter((p) => p.gemini && p.id !== pinned.id)];
+    } else if (String(env.IMAGE_PINNED_FALLBACK || "") === "1") {
+      queue = [pinned, ...all.filter((p) => p.id !== pinned.id)];
+    } else {
+      queue = [pinned];
+    }
   } else {
     // ПРИОРИТЕТ: если есть GEMINI_API_KEY — сначала Gemini Image, чтобы
     // /test показывал именно связку Gemini текст + Gemini картинка.
