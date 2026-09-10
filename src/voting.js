@@ -169,7 +169,7 @@ export async function handleCallback(query, env) {
     const mid = query.message.message_id;
 
     if (screen === "menu") {
-      await editMessage(chatId, mid, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, menuKeyboard());
+      await editMessage(chatId, mid, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, menuKeyboard(s));
     } else if (screen === "source") {
       await editMessage(chatId, mid, "🖼 <b>Источник картинок</b>", env, sourceKeyboard(s.source));
     } else if (screen === "style") {
@@ -213,9 +213,42 @@ export async function handleCallback(query, env) {
       const [, field, value] = data.split("|");
 
       if (field === "source") {
+        if (value === "search") {
+          await setPending(chatId, userId, "set_search", env);
+          await patchSettings(chatId, { source: "search" }, env);
+          await editMarkup(chatId, query.message.message_id, sourceKeyboard("search"), env);
+          await answerCallback(query.id, "Жду поисковый запрос", env);
+          await sendMessage(
+            chatId,
+            "🔎 Пришлите поисковый запрос для картинок.\n\n" +
+              "<i>Пример: кот работяга</i>\n\n" +
+              "⚠️ Поиск неофициальный и может иногда не сработать. " +
+              "Лучше дополнительно настроить запасной источник: /set_gdrive или генерацию ИИ.",
+            env
+          );
+          return;
+        }
+
         await patchSettings(chatId, { source: value }, env);
         await editMarkup(chatId, query.message.message_id, sourceKeyboard(value), env);
         await answerCallback(query.id, `Источник: ${value}`, env);
+        return;
+      }
+
+      if (field === "enabled") {
+        const s = await getSettings(chatId, env);
+        const enabled = !(s.enabled !== false);
+        await patchSettings(chatId, { enabled }, env);
+        await editMessage(
+          chatId,
+          query.message.message_id,
+          enabled
+            ? "✅ Бот включён. Утренние сообщения снова будут отправляться."
+            : "⛔ Бот отключён в этом чате. Он остаётся в чате, но ничего не пишет по расписанию.",
+          env,
+          menuKeyboard({ ...s, enabled })
+        );
+        await answerCallback(query.id, enabled ? "Включён" : "Отключён", env);
         return;
       }
 

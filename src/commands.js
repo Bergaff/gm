@@ -409,6 +409,46 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       } catch (e) {
         error = `${error}; fallback Search: ${e}`;
       }
+    } else if (useSearch) {
+      // Поиск — неофициальный источник. Если он не отдал картинку,
+      // обязательно пробуем второй способ: сначала Drive, потом генерацию.
+      if (folderId) {
+        try {
+          image = await getGdriveImage(chatId, folderId, env, settings.avoidRepeatLast);
+        } catch (e) {
+          error = `${error}; fallback Drive: ${e}`;
+        }
+      }
+
+      if (!image) {
+        let fallbackPrompt = rawPrompt;
+        let fallbackNegative = "";
+        let fallbackPromptError = null;
+
+        if (needsTranslation(rawPrompt)) {
+          const tr = await translatePrompt(rawPrompt, env);
+          fallbackPrompt = tr.text;
+          if (!tr.translated) fallbackPromptError = tr.error || "русский промпт не удалось перевести";
+        }
+
+        if (!fallbackPromptError) {
+          fallbackNegative = addSafetyNegative(negativeFor(settings.imageStyle, fallbackPrompt));
+          fallbackPrompt = enforcePrompt(applyStyle(fallbackPrompt, settings.imageStyle));
+          const result = await generateImage(fallbackPrompt, env, {
+            preferred: settings.nimModel,
+            chatId,
+            negative: fallbackNegative,
+          });
+          attempts = attempts.concat(result.attempts || []);
+          if (result.ok) {
+            image = result;
+            activePrompt = fallbackPrompt;
+            negative = fallbackNegative;
+          }
+        } else {
+          attempts.push({ provider: "prompt", ok: false, status: 0, latency: 0, error: fallbackPromptError });
+        }
+      }
     } else if (!useNim && !useSearch) {
       // Fallback из Drive в генерацию: готовим промпт так же строго, как
       // для основного NIM-источника, включая перевод. Не отправляем кириллицу
@@ -483,6 +523,8 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     let hint = "";
     if (settings.source === "search" && !settings.searchQuery) {
       hint = "\n<i>Поисковый запрос не задан: /set_search кот работяга</i>";
+    } else if (settings.source === "search") {
+      hint = "\n<i>Поиск не сработал. Так как он неофициальный, настройте запасной источник: /set_gdrive или /set_source nim</i>";
     } else if (!settings.gdriveFolder && settings.source === "gdrive") {
       hint = "\n<i>Источник не настроен: /set_source nim или /set_gdrive</i>";
     } else if (attempts.some((a) => a.status === 429 ||
@@ -691,7 +733,13 @@ const KNOWN_COMMANDS = new Set([
 // Команды, которые умеют работать в два шага: сначала вопрос, потом ответ.
 const PENDING_PROMPTS = {
   set_gdrive: "Пришлите ссылку на публичную папку Google Drive следующим сообщением.\n\n<i>/cancel — отмена</i>",
-  set_search: "Пришлите поисковый запрос для картинок.\n\n<i>Пример: кот работяга</i>\n<i>/cancel — отмена</i>",
+  set_search:
+    "Пришлите поисковый запрос для картинок.\n\n" +
+    "<i>Пример: кот работяга</i>\n\n" +
+    "⚠️ Поиск через Yandex/DuckDuckGo неофициальный: он может иногда не отдать картинку. " +
+    "Поэтому лучше дополнительно настроить второй способ: Google Drive (/set_gdrive) " +
+    "или генерацию ИИ (/set_source nim).\n\n" +
+    "<i>/cancel — отмена</i>",
   set_caption_traits: "Пришлите короткие характеристики чата, каждую с новой строки.\n\n<i>Например:</i>\n<code>ироничные\nинженеры\nдобрые\nлюбят мемы</code>\n\n<i>/cancel — отмена</i>",
   add_prompt_weekday: "Пришлите текст промпта для <b>будней</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
   add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b> следующим сообщением.\n\n<i>/cancel — отмена</i>",
@@ -708,7 +756,7 @@ export function sourceKeyboard(current) {
         { text: `${mark("nim")}Генерация`, callback_data: "s|source|nim" },
       ],
       [
-        { text: `${mark("search")}Поиск`, callback_data: "s|source|search" },
+        { text: `${mark("search")}Поисковый запрос`, callback_data: "s|source|search" },
         { text: `${mark("mixed")}Drive + генерация`, callback_data: "s|source|mixed" },
       ],
       [{ text: "◀️ Назад в меню", callback_data: "nav|menu" }],
@@ -717,7 +765,8 @@ export function sourceKeyboard(current) {
 }
 
 // Главное меню — единая точка возврата для всех кнопок «Назад».
-export function menuKeyboard() {
+export function menuKeyboard(settings = null) {
+  const enabled = settings ? settings.enabled !== false : true;
   return {
     inline_keyboard: [
       [
@@ -734,6 +783,7 @@ export function menuKeyboard() {
         { text: "⚙️ Настройки", callback_data: "nav|settings" },
       ],
       [
+        { text: enabled ? "⛔ Отключить бота" : "✅ Включить бота", callback_data: "s|enabled|toggle" },
         { text: "🩺 Диагностика", callback_data: "nav|diag" },
       ],
     ],
@@ -1153,6 +1203,12 @@ export async function handleCommand(message, env, options = {}) {
         await sendMessage(chatId, "Использование: <code>/set_source gdrive|nim|search|mixed</code>", env);
         return;
       }
+      if (value === "search") {
+        await patchSettings(chatId, { source: "search" }, env);
+        await setPending(chatId, userId, "set_search", env);
+        await sendMessage(chatId, PENDING_PROMPTS.set_search, env);
+        return;
+      }
       await patchSettings(chatId, { source: value }, env);
       await sendMessage(chatId, `✅ Источник картинок: <b>${value}</b>`, env);
       return;
@@ -1345,8 +1401,9 @@ export async function handleCommand(message, env, options = {}) {
     }
 
     case "/menu": {
+      const s = await getSettings(chatId, env);
       await sendMessage(chatId, "📋 <b>Меню бота</b>\n\nВыберите раздел:", env, {
-        reply_markup: menuKeyboard(),
+        reply_markup: menuKeyboard(s),
       });
       return;
     }
@@ -1868,6 +1925,8 @@ async function applySearchQuery(value, chatId, env) {
       `Запрос: <code>${escapeHtml(query)}</code>\n\n` +
       "Буду брать каждый раз новую картинку без повторов из выдачи. " +
       "18+ фильтр включён на стороне поиска и дополнительно проверяется по результатам.\n\n" +
+      "⚠️ Поиск неофициальный, поэтому настройте второй способ на случай сбоя: " +
+      "папку /set_gdrive или генерацию /set_source nim. Если второй способ уже есть — всё нормально.\n\n" +
       "Проверить: /test",
     env
   );
@@ -2071,7 +2130,7 @@ function helpText(role) {
     "",
     "<b>Прочее</b>",
     "/voting_on, /voting_off",
-    "/enable, /disable",
+    "/enable, /disable — или кнопка в /menu",
     "/test — отправить прямо сейчас",
     "/test weekday 2 или /test weekend 1 — проверить конкретный промпт",
     "/test list — показать будние и выходные промпты сразу",
