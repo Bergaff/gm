@@ -692,11 +692,12 @@ function markFailed(id, env, status = 0, error = "") {
   // Гасить её на 30 минут незачем: следующий запрос обычно нормальный.
   if (String(error).startsWith("брак генерации")) return;
 
-  // 400/422 — это плохой запрос (например, промпт), повтор через 30 минут
-  // ничего не изменит и зря выключает рабочую модель. 401/403/429 и 5xx —
-  // временные/квотные, их гасим на полный срок.
-  if (status === 400 || status === 422) return;
-  const ttl = status === 429 || status >= 500 ? FAIL_COOLDOWN : 5 * 60;
+  // 400/422 часто бывают плохим промптом, но у агрегаторов вроде OpenRouter
+  // это ещё и «у модели нет image endpoint / unsupported». Такие ошибки тоже
+  // стоит ненадолго гасить, иначе auto будет долбить заведомо нерабочую модель.
+  const permanentModelError = /no endpoints|unsupported|not support|model.*not|does not support|image.*not/i.test(String(error || ""));
+  if ((status === 400 || status === 422) && !permanentModelError) return;
+  const ttl = status === 429 || status >= 500 || permanentModelError ? FAIL_COOLDOWN : 5 * 60;
   return env.BOT_KV.put(`nimfail:${id}`, "1", { expirationTtl: ttl });
 }
 
@@ -804,11 +805,9 @@ export async function generateImage(prompt, env, options = {}) {
   for (const provider of queue) {
     // Закреплённую вручную модель пробуем всегда, даже после сбоя.
     if (provider.id !== pinnedId && (await isCoolingDown(provider.id, env))) {
-      attempts.push({
-        provider: provider.id, ok: false, status: 0, latency: 0,
-        error: "cooldown после недавней ошибки",
-        skipped: true,
-      });
+      // Это не запрос к модели, а локальный пропуск по cooldown. Не пишем его
+      // в attempts/gen_log, иначе статистика «сбоев» раздувается: один
+      // реальный 429 превращается в десятки псевдо-сбоев.
       continue;
     }
 

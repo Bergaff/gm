@@ -153,10 +153,12 @@ export async function votesByProvider(env, chatId = null) {
                 WHERE h.chat_id = g.chat_id
                   AND h.created_at = g.created_at
                   AND h.ok = 1
+                  AND COALESCE(h.error, '') NOT LIKE 'cooldown после%'
               ) THEN 1 ELSE 0 END) AS switchedFails
        FROM gen_log g
        ${failWhere}
        ${failWhere ? "AND" : "WHERE"} g.ok = 0
+         AND COALESCE(g.error, '') NOT LIKE 'cooldown после%'
        GROUP BY g.provider`
     );
     const failRows = await (chatId ? failStmt.bind(chatId) : failStmt).all();

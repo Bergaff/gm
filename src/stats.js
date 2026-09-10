@@ -114,7 +114,9 @@ async function byModel(chatId, days, env) {
                 AND h.ok = 1
             ) THEN 1 ELSE 0 END) AS switched,
             COUNT(*) AS calls
-     FROM gen_log g WHERE g.created_at >= ?
+     FROM gen_log g
+     WHERE g.created_at >= ?
+       AND COALESCE(g.error, '') NOT LIKE 'cooldown после%'
      GROUP BY g.provider ORDER BY calls DESC`
   ).bind(new Date(Date.now() - days * 86400000).toISOString()).all();
 
