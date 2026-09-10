@@ -26,6 +26,7 @@ import {
   pickPrompt,
   holidayModeKeyboard,
   replyToThisKeyboard,
+  restartChat,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
 import { getRole, canEdit } from "./access.js";
@@ -389,6 +390,14 @@ export async function handleCallback(query, env) {
         await editMessage(chatId, query.message.message_id, searchFallbackText(s), env,
           searchFallbackKeyboard(value));
         await answerCallback(query.id, value === "gdrive" ? "Запасной: Drive" : "Запасной: ИИ", env);
+        return;
+      }
+
+      if (field === "restart_chat") {
+        await answerCallback(query.id, "Перезапускаю чат", env);
+        const text = await restartChat(chatId, env);
+        const s = await getSettings(chatId, env);
+        await editMessage(chatId, query.message.message_id, text, env, menuKeyboard(s));
         return;
       }
 

@@ -46,3 +46,10 @@ export async function releaseTestLock(env, acquired) {
     // lock не должен ломать основной сценарий
   }
 }
+
+export async function clearTestLockForChat(env, chatId) {
+  if (!env?.BOT_KV) return;
+  await env.BOT_KV.delete(`test:lock:${chatId}`);
+  // На случай если раньше был включён глобальный lock.
+  await env.BOT_KV.delete("test:lock:global");
+}

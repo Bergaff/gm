@@ -8,13 +8,6 @@
 // Тарифы: https://developers.cloudflare.com/workers-ai/platform/pricing/
 
 export const FREE_NEURONS_PER_DAY = 10000;
-export const DEFAULT_GEMINI_REQUESTS_PER_DAY = 50;
-
-function numEnv(env, name, fallback = 0) {
-  const n = Number(env?.[name]);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
 // Ключ по дате UTC — лимит сбрасывается в 00:00 UTC
 function dayKey(offsetDays = 0) {
   const d = new Date(Date.now() + offsetDays * 86400000);
@@ -152,18 +145,6 @@ export async function usageText(env, escapeHtml) {
   const perPost = 72;
   const postsLeft = Math.floor(left / perPost);
 
-  const geminiTextLimit = numEnv(env, "GEMINI_TEXT_FREE_REQUESTS_PER_DAY",
-    numEnv(env, "GEMINI_FREE_REQUESTS_PER_DAY", DEFAULT_GEMINI_REQUESTS_PER_DAY));
-  const geminiImageLimit = numEnv(env, "GEMINI_IMAGE_FREE_REQUESTS_PER_DAY",
-    numEnv(env, "GEMINI_FREE_REQUESTS_PER_DAY", DEFAULT_GEMINI_REQUESTS_PER_DAY));
-  const geminiText = today.geminiText || 0;
-  const geminiImage = today.geminiImage || 0;
-  const openrouterImageLimit = numEnv(env, "OPENROUTER_IMAGE_DAILY_LIMIT", 20);
-  const openrouterImage = today.openrouterImage || 0;
-  const openrouterImagePct = Math.min(100, (openrouterImage / openrouterImageLimit) * 100);
-  const geminiTextPct = Math.min(100, (geminiText / geminiTextLimit) * 100);
-  const geminiImagePct = Math.min(100, (geminiImage / geminiImageLimit) * 100);
-
   const lines = [
     "⚡ <b>Расход Cloudflare Workers AI</b>",
     "",
@@ -179,13 +160,6 @@ export async function usageText(env, escapeHtml) {
     `🖼 картинки: ${Math.round(today.image)} нейронов`,
     `💬 текст: ${Math.round(today.text)} нейронов`,
     `📞 вызовов: ${today.calls}`,
-    "",
-    "<b>Gemini сегодня</b>",
-    `💬 текст: ${geminiText}/${geminiTextLimit} запросов (${geminiTextPct.toFixed(0)}%)`,
-    `<code>${bar(geminiTextPct)}</code>`,
-    `🖼 картинки: ${geminiImage}/${geminiImageLimit} запросов (${geminiImagePct.toFixed(0)}%)`,
-    `<code>${bar(geminiImagePct)}</code>`,
-    `📞 всего Gemini: ${today.gemini || 0} запросов`,
     "",
     "<b>Другие провайдеры</b>",
     `🟢 NVIDIA: ${today.nvidia || 0} запросов` +
@@ -217,17 +191,6 @@ export async function usageText(env, escapeHtml) {
     lines.push("", "🟡 Cloudflare: израсходовано больше 70%.");
   }
 
-  if (geminiTextPct >= 90 || geminiImagePct >= 90) {
-    lines.push("", "🔴 <b>Gemini близко к дневному лимиту</b> — стоит меньше гонять /test или поднять лимит в переменных.");
-  } else if (geminiTextPct >= 70 || geminiImagePct >= 70) {
-    lines.push("", "🟡 Gemini: израсходовано больше 70% от локального дневного лимита.");
-  }
-
-
-  lines.push(
-    "",
-    `<i>Лимит Gemini считается локально по запросам. Если у вашего аккаунта другой free tier, задайте <code>GEMINI_TEXT_FREE_REQUESTS_PER_DAY</code> и/или <code>GEMINI_IMAGE_FREE_REQUESTS_PER_DAY</code>.</i>`
-  );
 
   return lines.join("\n");
 }

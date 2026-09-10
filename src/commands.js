@@ -7,7 +7,7 @@ import {
 } from "./config.js";
 import { sendMessage, sendPhotoBytes, sendMediaBytes, escapeHtml, tg, editMessage } from "./telegram.js";
 import { getSettings, patchSettings, registerChat, listChats } from "./storage.js";
-import { setPending, getPending, clearPending } from "./pending.js";
+import { setPending, getPending, clearPending, clearPendingForChat } from "./pending.js";
 import { getRole, canEdit, canGrant, grantUser, revokeUser, listGranted } from "./access.js";
 import { parseFolderId, getGdriveImage, listImages } from "./images/gdrive.js";
 import { getSearchImage } from "./images/search.js";
@@ -23,6 +23,7 @@ import { newPostId, savePost, logAttempts, votesByProvider } from "./db.js";
 import { localParts, parseTimeSpec, withChatHoliday } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
+import { clearTestLockForChat } from "./testLock.js";
 import {
   parseExamples,
   getExamples,
@@ -845,7 +846,7 @@ const KNOWN_COMMANDS = new Set([
   "/holiday", "/holidays", "/holiday_remove",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
-  "/test", "/reset", "/cancel", "/diag", "/menu",
+  "/test", "/reset", "/restart_chat", "/cancel", "/diag", "/menu",
   "/set_character", "/ai_on", "/ai_off",
   "/grant", "/revoke", "/access",
   "/stats", "/stats_models", "/stats_chats", "/stats_recent",
@@ -922,6 +923,9 @@ export function menuKeyboard(settings = null) {
       [
         { text: "✍️ Характеристики", callback_data: "nav|caption_style" },
         { text: "⚙️ Настройки", callback_data: "nav|settings" },
+      ],
+      [
+        { text: "♻️ Перезапуск чата", callback_data: "s|restart_chat|1" },
       ],
       [
         { text: enabled ? "⛔ Отключить бота" : "✅ Включить бота", callback_data: "s|enabled|toggle" },
@@ -1137,6 +1141,27 @@ export async function handleDocument(message, env, options = {}) {
     ].join("\n"),
     env
   );
+}
+
+export async function restartChat(chatId, env) {
+  const s = await getSettings(chatId, env);
+  const now = localParts(s.timezone);
+  const pendingDeleted = await clearPendingForChat(chatId, env).catch(() => 0);
+
+  await clearTestLockForChat(env, chatId).catch(() => null);
+  await env.BOT_KV.delete(`sent:${chatId}:${now.date}`).catch(() => null);
+  await patchSettings(chatId, { enabled: true }, env).catch(() => null);
+
+  return [
+    "♻️ <b>Чат перезапущен</b>",
+    "",
+    "Снял зависшие ожидания и lock теста.",
+    "Сбросил защиту от повторной отправки на сегодня.",
+    "Рассылка в этом чате включена.",
+    pendingDeleted ? `Очищено ожиданий ответа: <b>${pendingDeleted}</b>.` : null,
+    "",
+    "Теперь можно снова попробовать /test или дождаться расписания.",
+  ].filter(Boolean).join("\n");
 }
 
 export async function handleCommand(message, env, options = {}) {
@@ -1799,6 +1824,11 @@ export async function handleCommand(message, env, options = {}) {
       return;
     }
 
+    case "/restart_chat": {
+      await sendMessage(chatId, await restartChat(chatId, env), env);
+      return;
+    }
+
     case "/enable":
     case "/disable": {
       const on = command === "/enable";
@@ -2382,6 +2412,7 @@ function helpText(role) {
     "/test — список промптов с кнопками для теста",
     "/enable — включить утреннюю рассылку",
     "/disable — отключить бота в этом чате, не удаляя его",
+    "/restart_chat — снять зависший тест/ожидание и включить чат",
     "/reset — сброс настроек чата",
     "/id — узнать ID чата и свой",
     "/diag — проверить, что настроено и что сломано",
@@ -2403,7 +2434,7 @@ function helpText(role) {
       "/stats_post &lt;id&gt;",
       "/stats_errors [N]",
       "/nim_health",
-      "/usage — остаток лимита Cloudflare и счётчик Gemini",
+      "/usage — остаток лимита Cloudflare",
       "/change — модели во всех чатах, смена кнопками",
       "/examples — общие примеры подписей (.txt файлом)",
       "/examples_clear — удалить примеры",
