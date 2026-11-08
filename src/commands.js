@@ -80,16 +80,37 @@ function birthdayPeople(settings, localDate) {
       id,
       name: b.name || b.username || id,
       username: b.username || "",
+      wish: b.wish || "",
       at: b.username ? "@" + b.username : b.name || id,
     }));
 }
 
+// Персональное поздравление (/birthday_wish): подставляем {name}/{username},
+// а если автор не упомянул именинника сам — вежливо ставим обращение первым.
+export function renderBirthdayWish(person) {
+  const wish = String(person?.wish || "").trim();
+  if (!wish) return "";
+  const hasPlaceholder = /\{name\}|\{username\}/.test(wish);
+  const rendered = wish
+    .replaceAll("{name}", person.at || person.name || "")
+    .replaceAll("{username}", person.username ? "@" + person.username : person.at || "");
+  return hasPlaceholder || rendered.includes(person.at) ? rendered : `${person.at}, ${rendered}`;
+}
+
 function birthdayLine(people) {
   if (!people.length) return "";
-  const names = people.map((p) => p.at).join(", ");
-  return people.length === 1
-    ? `🎂 Сегодня день рождения у ${names}! Поздравляем!`
-    : `🎂 Сегодня дни рождения у ${names}! Поздравляем!`;
+  const lines = [];
+  const generic = people.filter((p) => !String(p.wish || "").trim());
+  const wished = people.filter((p) => String(p.wish || "").trim());
+
+  if (generic.length) {
+    const names = generic.map((p) => p.at).join(", ");
+    lines.push(generic.length === 1
+      ? `🎂 Сегодня день рождения у ${names}! Поздравляем!`
+      : `🎂 Сегодня дни рождения у ${names}! Поздравляем!`);
+  }
+  for (const p of wished) lines.push(`🎂 ${renderBirthdayWish(p)}`);
+  return lines.join("\n");
 }
 
 function parseBirthdayDate(value) {
@@ -441,6 +462,15 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       text = generated.text;
       captionSource = "llm";
       captionModel = generated.model || null;
+
+      // Персональное поздравление нельзя терять: если модель не вставила
+      // его в подпись — дописываем отдельной строкой после текста.
+      const wished = birthdaysToday.filter((b) => String(b.wish || "").trim());
+      const missing = wished.filter((b) => {
+        const rendered = renderBirthdayWish(b).toLowerCase();
+        return rendered && !text.toLowerCase().includes(rendered.slice(0, 24));
+      });
+      if (missing.length) text = `${text}\n\n${birthdayLine(missing)}`;
     } else {
       // Крайний запасной вариант: если LLM не ответил, берём случайный
       // удачный пример из библиотеки. Это лучше, чем сухой дефолтный шаблон,
@@ -889,7 +919,7 @@ const KNOWN_COMMANDS = new Set([
   "/searches", "/add_search", "/del_search",
   "/prompts", "/set_prompt", "/add_prompt", "/del_prompt", "/edit_prompt",
   "/models", "/set_model", "/set_text_provider", "/set_timezone", "/style", "/caption_style",
-  "/birthday", "/birthdays", "/birthday_remove",
+  "/birthday", "/birthdays", "/birthday_remove", "/birthday_wish", "/birthdays_all",
   "/holiday", "/holidays", "/holiday_remove",
   "/roulette", "/roulette_add", "/roulette_join", "/roulette_remove",
   "/roulette_list", "/roulette_participants", "/roulette_top", "/roulette_stats",
@@ -1267,7 +1297,16 @@ export async function handleCommand(message, env, options = {}) {
   // ── Дни рождения ────────────────────────────────────────────────────
   // Свой день рождения может назначить сам участник. За другого — только
   // админ чата или владелец бота, ответом на сообщение этого участника.
-  if (command === "/birthday" || command === "/birthday_remove" || command === "/birthdays") {
+  if (command === "/birthdays_all") {
+    if (role !== "owner") {
+      await sendMessage(chatId, "⛔ Список дней рождения по всем чатам доступен только владельцу бота.", env);
+      return;
+    }
+    await sendAllBirthdays(chatId, env);
+    return;
+  }
+
+  if (command === "/birthday" || command === "/birthday_remove" || command === "/birthdays" || command === "/birthday_wish") {
     await handleBirthdayCommand(command, value, message, chatId, userId, role, env);
     return;
   }
@@ -1951,6 +1990,22 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "roulette_word":
       return applyRouletteWord(text, chatId, env);
 
+    case "birthday_wish": {
+      if (!pending.targetId) return;
+      const saved = await saveBirthdayWish(chatId, pending.targetId, text, env);
+      if (!saved) {
+        await sendMessage(chatId, "Не нашёл день рождения для этого человека. Сначала: <code>/birthday ДД.ММ</code>", env);
+        return;
+      }
+      const at = saved.username ? "@" + saved.username : saved.name || pending.targetId;
+      await sendMessage(
+        chatId,
+        `✅ Персональное поздравление сохранено.\n\n🎂 ${escapeHtml(renderBirthdayWish({ ...saved, id: String(pending.targetId), at }))}`,
+        env
+      );
+      return;
+    }
+
     case "add_search_weekday":
       return addSearchQuery("weekday", text, chatId, env);
 
@@ -2096,6 +2151,68 @@ async function handleHolidayCommand(command, value, chatId, env) {
   );
 }
 
+// Сохранить/убрать персональное поздравление для записи дня рождения.
+async function saveBirthdayWish(chatId, targetId, wish, env) {
+  const s = await getSettings(chatId, env);
+  const birthdays = { ...(s.birthdays || {}) };
+  const entry = birthdays[String(targetId)];
+  if (!entry) return null;
+  if (wish) entry.wish = String(wish).slice(0, 300);
+  else delete entry.wish;
+  birthdays[String(targetId)] = entry;
+  await patchSettings(chatId, { birthdays }, env);
+  return entry;
+}
+
+// 🎂 Все дни рождения по ВСЕМ чатам — только для владельца бота.
+// Показывает, кто добавил сам, а кого добавили, и у кого уже есть
+// персональное поздравление (✍️).
+async function sendAllBirthdays(chatId, env) {
+  const chatIds = await listChats(env).catch(() => []);
+  const lines = ["🎂 <b>Все дни рождения (все чаты)</b>", ""];
+  let total = 0;
+  let chatsWith = 0;
+
+  for (const id of chatIds) {
+    const s = await getSettings(id, env).catch(() => null);
+    const entries = Object.entries(s?.birthdays || {})
+      .sort((a, b) => String(a[1].date).localeCompare(String(b[1].date)));
+    if (!entries.length) continue;
+    chatsWith++;
+    total += entries.length;
+    lines.push(`<b>${escapeHtml(s.title || id)}</b> <code>${id}</code>`);
+    for (const [userId, b] of entries) {
+      const who = escapeHtml(b.username ? "@" + b.username : b.name || userId);
+      const addedBy = b.setBy
+        ? (String(b.setBy) === String(userId) ? " · добавил сам" : " · добавил админ/владелец")
+        : "";
+      const wishMark = b.wish ? " · ✍️ персональное поздравление" : "";
+      lines.push(`• <b>${formatBirthdayDate(b.date)}</b> — ${who} <code>${userId}</code>${addedBy}${wishMark}`);
+    }
+    lines.push("");
+  }
+
+  if (!total) {
+    await sendMessage(chatId, "🎂 Ни в одном чате дни рождения пока не указаны.\n\nСвой ставится командой <code>/birthday ДД.ММ</code> в нужном чате.", env);
+    return;
+  }
+
+  lines.push(`Всего людей: <b>${total}</b> · чатов с днями рождения: <b>${chatsWith}</b>`);
+  lines.push("");
+  lines.push("Персональное поздравление: reply на человека + <code>/birthday_wish текст</code> (или себе — без reply).");
+
+  // Telegram режет сообщения на 4096 символов — шлём кусками по строкам.
+  let chunk = "";
+  for (const line of lines) {
+    if ((chunk + "\n" + line).length > 3500 && chunk) {
+      await sendMessage(chatId, chunk, env);
+      chunk = "";
+    }
+    chunk = chunk ? chunk + "\n" + line : line;
+  }
+  if (chunk) await sendMessage(chatId, chunk, env);
+}
+
 async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
   if (command === "/birthdays") {
     const s = await getSettings(chatId, env);
@@ -2105,9 +2222,13 @@ async function handleBirthdayCommand(command, value, message, chatId, userId, ro
       return;
     }
 
-    const lines = list.map(([id, b]) =>
-      `• <b>${formatBirthdayDate(b.date)}</b> — ${escapeHtml(b.username ? "@" + b.username : b.name || id)} <code>${id}</code>`
-    );
+    const lines = list.map(([id, b]) => {
+      const addedBy = b.setBy
+        ? (String(b.setBy) === String(id) ? " · добавил сам" : " · добавил админ/владелец")
+        : "";
+      const wish = b.wish ? ` · ✍️ <i>${escapeHtml(String(b.wish).slice(0, 60))}${String(b.wish).length > 60 ? "…" : ""}</i>` : "";
+      return `• <b>${formatBirthdayDate(b.date)}</b> — ${escapeHtml(b.username ? "@" + b.username : b.name || id)} <code>${id}</code>${addedBy}${wish}`;
+    });
     await sendMessage(chatId, `🎂 <b>Дни рождения этого чата</b>\n\n${lines.join("\n")}`, env);
     return;
   }
@@ -2135,6 +2256,50 @@ async function handleBirthdayCommand(command, value, message, chatId, userId, ro
     return;
   }
 
+  // Персональное поздравление вместо общего «с днём рождения».
+  // Себе — обычной командой; другому — reply + команда (админ/владелец).
+  if (command === "/birthday_wish") {
+    const entry = birthdays[String(target.id)];
+    const targetName = escapeHtml(target.username ? "@" + target.username : target.first_name || String(target.id));
+    if (!entry) {
+      await sendMessage(
+        chatId,
+        `У ${targetName} в этом чате ещё не указан день рождения.\n\nСначала: <code>/birthday ДД.ММ</code>${isSelf ? "" : " (ответом на его сообщение)"}, потом уже персональное поздравление.`,
+        env
+      );
+      return;
+    }
+
+    if (/^(clear|удалить|off|нет)$/i.test(value || "")) {
+      await saveBirthdayWish(chatId, target.id, "", env);
+      await sendMessage(chatId, `🗑 Персональное поздравление для ${targetName} убрано. Снова будет общее поздравление.`, env);
+      return;
+    }
+
+    if (value) {
+      const saved = await saveBirthdayWish(chatId, target.id, value, env);
+      await sendMessage(
+        chatId,
+        `✅ Персональное поздравление для ${targetName} сохранено.\n\n🎂 ${escapeHtml(renderBirthdayWish({ ...saved, id: String(target.id), at: target.username ? "@" + target.username : target.first_name || String(target.id) }))}`,
+        env
+      );
+      return;
+    }
+
+    await setPending(chatId, userId, "birthday_wish", env, { targetId: String(target.id) });
+    await sendMessage(
+      chatId,
+      `✍️ Пришлите текст персонального поздравления для ${targetName}.\n\n` +
+        "Можно с обращением по имени: <code>{name}</code> подставится автоматически. " +
+        "Если имени в тексте нет, бот добавит обращение сам.\n\n" +
+        "<i>Пример:</i> <code>{name}, с днём рождения! Пусть код компилируется с первого раза, а кофе никогда не заканчивается.</code>\n\n" +
+        "<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>",
+      env,
+      { reply_markup: replyToThisKeyboard("Текст персонального поздравления") }
+    );
+    return;
+  }
+
   const date = parseBirthdayDate(value);
   if (!date) {
     await sendMessage(
@@ -2153,6 +2318,8 @@ async function handleBirthdayCommand(command, value, message, chatId, userId, ro
     username: target.username || "",
     setBy: String(userId),
     updatedAt: new Date().toISOString(),
+    // Персональное поздравление при смене даты не теряем.
+    ...(birthdays[String(target.id)]?.wish ? { wish: birthdays[String(target.id)].wish } : {}),
   };
   await patchSettings(chatId, { birthdays }, env);
 
@@ -2465,7 +2632,9 @@ function helpText(role) {
     "<b>Дни рождения</b>",
     "/birthday 08.03 — указать свой день рождения",
     "/birthday 08.03 — reply на участника, если вы админ/владелец",
-    "/birthdays — список",
+    "/birthdays — список этого чата (видно, кто добавил сам и у кого персональное поздравление)",
+    "/birthday_wish текст — персональное поздравление вместо общего; себе или reply-цели (админ/владелец). {name} — обращение к имениннику",
+    "/birthday_wish clear — убрать персональное поздравление",
     "/birthday_remove — удалить свой или reply-цель",
     "",
     "<b>Праздники чата</b>",
@@ -2515,6 +2684,7 @@ function helpText(role) {
       "/change — модели во всех чатах, смена кнопками",
       "/examples — общие примеры подписей (.txt файлом)",
       "/examples_clear — удалить примеры",
+      "/birthdays_all — все дни рождения по всем чатам: кто добавил сам, у кого персональное поздравление",
       "/chats",
       "/export_csv [дней]"
     );

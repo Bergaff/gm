@@ -297,6 +297,10 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
   const dayType = hint ? `${hint}. По типу это ${base}` : base;
 
   const birthdayNames = (birthdays || []).map((b) => b.at || b.name).filter(Boolean).join(", ");
+  const birthdayWishes = (birthdays || [])
+    .filter((b) => String(b?.wish || "").trim())
+    .map((b) => `${b.at || b.name}: «${String(b.wish).trim()}»`)
+    .join("; ");
 
   // ВАЖНО: характер чата идёт в system-сообщение и стоит ПЕРВЫМ.
   // Раньше он был в user, а system диктовал нейтральный тон — модель
@@ -352,6 +356,9 @@ function buildPrompt(character, isWeekend, chatTitle, examples = [], weekday = "
         dayRule(weekday, mentionDay && !holiday) +
         (birthdayNames
           ? `ДЕНЬ РОЖДЕНИЯ: сегодня день рождения у ${birthdayNames}. Обязательно поздравь их тепло, но коротко.\n\n`
+          : "") +
+        (birthdayWishes
+          ? `ПЕРСОНАЛЬНЫЕ ПОЗДРАВЛЕНИЯ: для этих именинников задан личный текст — используй его почти дословно, не заменяй общим «с днём рождения»: ${birthdayWishes}\n\n`
           : "") +
         recentCaptionsBlock(recentCaptions) +
         exampleBlock(examples) +

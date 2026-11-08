@@ -40,6 +40,16 @@ export const ROULETTE_COMMANDS = new Set([
   "/roulette_reset",
 ]);
 
+// День рулетки и год статистики считаются ВСЕГДА по московскому времени,
+// независимо от timezone конкретного чата: 1 января по МСК топ начинается
+// с чистого листа (итоги прошлого года остаются в wins["<прошлый год>"],
+// но в текущий топ уже не попадают).
+export const ROULETTE_TIMEZONE = "Europe/Moscow";
+
+function rouletteNow() {
+  return localParts(ROULETTE_TIMEZONE);
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function pick(list) {
@@ -126,7 +136,7 @@ export function rouletteKeyboard() {
 export function rouletteHomeText(settings) {
   const roulette = normalizeRoulette(settings);
   const count = participantEntries(roulette).length;
-  const now = localParts(settings?.timezone || "Europe/Moscow");
+  const now = rouletteNow();
   const todayWinner = roulette.last?.date === now.date ? roulette.last : null;
 
   return [
@@ -159,7 +169,8 @@ export function rouletteRulesText(settings) {
     `5. Статистика считается по годам. Лучшие видны в <code>/roulette_top</code> — «Топ-10 ${escapeHtml(many)} за текущий год».`,
     "6. Выйти из рулетки: <code>/roulette_remove</code>. Другого участника reply-командой может убрать админ или владелец.",
     `7. Слово рулетки (сейчас: «${escapeHtml(one)}» / «${escapeHtml(many)}») меняют админы командой <code>/roulette_word</code> — нужны формы для «1 …» и «5 …».`,
-    "8. Решение рулетки окончательное и обжалованию не подлежит. Подкуп ведущего кофе учитывается, но на результат не влияет. ☕",
+    "8. День рулетки и год статистики считаются <b>по московскому времени</b>. 1 января топ начинается с чистого листа, итоги прошлого года в него уже не попадают.",
+    "9. Решение рулетки окончательное и обжалованию не подлежит. Подкуп ведущего кофе учитывается, но на результат не влияет. ☕",
   ].join("\n");
 }
 
@@ -189,7 +200,7 @@ export function rouletteListText(settings) {
 
 export function rouletteTopText(settings, dateParts = null) {
   const roulette = normalizeRoulette(settings);
-  const now = dateParts || localParts(settings?.timezone || "Europe/Moscow");
+  const now = dateParts || rouletteNow();
   const year = String(now.date || "").slice(0, 4) || String(new Date().getFullYear());
   const yearWins = roulette.wins?.[year] || {};
   const people = new Map(participantEntries(roulette).map((p) => [p.id, p]));
@@ -321,7 +332,7 @@ export async function spinRoulette(chatId, env, options = {}) {
   const settings = await getSettings(chatId, env);
   const roulette = normalizeRoulette(settings);
   const people = participantEntries(roulette);
-  const now = localParts(settings.timezone || "Europe/Moscow");
+  const now = rouletteNow();
   const year = String(now.date).slice(0, 4);
 
   if (!people.length) {
@@ -513,7 +524,7 @@ export async function handleRouletteCommand(command, value, message, chatId, use
       await sendMessage(chatId, "⛔ Сбрасывать статистику рулетки может администратор чата или участник с выданным доступом.", env);
       return;
     }
-    const now = localParts(settings.timezone || "Europe/Moscow");
+    const now = rouletteNow();
     const year = String(now.date).slice(0, 4);
     const next = normalizeRoulette(settings);
     next.wins = { ...next.wins, [year]: {} };
