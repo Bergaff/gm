@@ -42,6 +42,12 @@ import {
   resolveStyle,
 } from "./styles.js";
 import {
+  ROULETTE_COMMANDS,
+  handleRouletteCommand,
+  applyRouletteWord,
+  normalizeRoulette,
+} from "./roulette.js";
+import {
   generateCaption,
   getTextApiKeys,
   hasDedicatedTextKey,
@@ -885,6 +891,9 @@ const KNOWN_COMMANDS = new Set([
   "/models", "/set_model", "/set_text_provider", "/set_timezone", "/style", "/caption_style",
   "/birthday", "/birthdays", "/birthday_remove",
   "/holiday", "/holidays", "/holiday_remove",
+  "/roulette", "/roulette_add", "/roulette_join", "/roulette_remove",
+  "/roulette_list", "/roulette_participants", "/roulette_top", "/roulette_stats",
+  "/roulette_rules", "/roulette_word", "/roulette_reset",
   "/set_weekday_time", "/set_weekend_time",
   "/voting_on", "/voting_off", "/enable", "/disable",
   "/test", "/reset", "/restart_chat", "/cancel", "/diag", "/menu",
@@ -928,6 +937,11 @@ const PENDING_PROMPTS = {
   add_prompt_weekend: "Пришлите текст промпта для <b>выходных</b>." + waitHint(),
   set_weekday_time: "Пришлите время для будней: <code>09:00</code> или диапазон <code>09:00-09:40</code>." + waitHint(),
   set_weekend_time: "Пришлите время для выходных: <code>10:30</code> или диапазон <code>10:00-11:00</code>." + waitHint(),
+  roulette_word:
+    "Пришлите слово рулетки в двух формах, каждую с новой строки.\n" +
+    "1 — для «1 …» (единственное число)\n" +
+    "2 — для «5 …» и «Топ-10 …» (множественное число)\n\n" +
+    "<code>пов\nповов</code>" + waitHint(),
 };
 
 export function sourceKeyboard(current) {
@@ -964,6 +978,7 @@ export function menuKeyboard(settings = null) {
       [
         { text: "✍️ Характеристики", callback_data: "nav|caption_style" },
         { text: "⚙️ Настройки", callback_data: "nav|settings" },
+        { text: "🎰 Рулетка", callback_data: "nav|roulette" },
       ],
       [
         { text: "♻️ Перезапуск чата", callback_data: "s|restart_chat|1" },
@@ -1254,6 +1269,14 @@ export async function handleCommand(message, env, options = {}) {
   // админ чата или владелец бота, ответом на сообщение этого участника.
   if (command === "/birthday" || command === "/birthday_remove" || command === "/birthdays") {
     await handleBirthdayCommand(command, value, message, chatId, userId, role, env);
+    return;
+  }
+
+  // ── Рулетка чата ────────────────────────────────────────────────────
+  // Крутить, участвовать и смотреть топ/правила могут все участники;
+  // права на добавление других, смену слова и сброс проверяются внутри.
+  if (ROULETTE_COMMANDS.has(command)) {
+    await handleRouletteCommand(command, value, message, chatId, userId, role, env);
     return;
   }
 
@@ -1925,6 +1948,9 @@ async function applyPendingValue(pending, text, chatId, env) {
     case "set_caption_traits":
       return applyCaptionTraits(text, chatId, env);
 
+    case "roulette_word":
+      return applyRouletteWord(text, chatId, env);
+
     case "add_search_weekday":
       return addSearchQuery("weekday", text, chatId, env);
 
@@ -2447,6 +2473,16 @@ function helpText(role) {
     "/holidays — список праздников чата с режимом дня",
     "/holiday_remove 31.12 — удалить праздник",
     "",
+    "<b>🎰 Рулетка</b>",
+    "/roulette — крутить рулетку (один раз в день на чат)",
+    "/roulette_add — участвовать самому; reply на сообщение — добавить другого (админ/владелец)",
+    "/roulette_remove — убрать себя; reply — убрать другого (админ/владелец)",
+    "/roulette_list — участники",
+    "/roulette_top — топ-10 за текущий год",
+    "/roulette_rules — правила рулетки",
+    "/roulette_word пов повов — сменить слово: 1-я форма для «1 …», 2-я для «5 …» и топа (админы)",
+    "/roulette_reset — сбросить статистику текущего года (админы)",
+    "",
     "<b>Прочее</b>",
     "/voting_on, /voting_off",
     "/enable, /disable — или кнопка в /menu",
@@ -2536,6 +2572,7 @@ function settingsText(s, chatId, role) {
     `Выходные/праздники: <b>${s.weekendTime}</b>`,
     `Дни рождения: <b>${Object.keys(s.birthdays || {}).length}</b>`,
     `Свои праздники чата: <b>${Object.keys(s.holidays || {}).length}</b>`,
+    `Рулетка: слово <b>${escapeHtml(normalizeRoulette(s).wordSingular)}</b> / <b>${escapeHtml(normalizeRoulette(s).wordPlural)}</b>, участников: <b>${Object.keys(normalizeRoulette(s).participants || {}).length}</b>`,
     "",
     `Ваша роль: <b>${roleLabel(role)}</b>`,
     "",

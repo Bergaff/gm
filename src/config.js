@@ -50,7 +50,17 @@ export const DEFAULT_SETTINGS = {
 
   // Пользовательские праздники этого чата:
   // { "MM-DD": { name: "Название", isWeekend: true|false } }
-  holidays: {}, 
+  holidays: {},
+
+  // 🎰 Рулетка чата (/roulette): участники, слово и статистика по годам.
+  // wordSingular — форма для «1 пов», wordPlural — для «5 пов» и «Топ-10 пов».
+  roulette: {
+    wordSingular: "пов",
+    wordPlural: "пов",
+    participants: {},
+    wins: {},
+    last: null,
+  },
 
   // auto | конкретный id провайдера из nim.js
   nimModel: "auto",

@@ -36,6 +36,15 @@ import { NIM_PROVIDERS, getApiKeys, getAllProviders, markOpenRouterImageModelBad
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 import { localParts, withChatHoliday } from "./scheduler.js";
 import { acquireTestLock, releaseTestLock } from "./testLock.js";
+import {
+  spinRoulette,
+  handleRouletteCommand,
+  rouletteKeyboard,
+  rouletteHomeText,
+  rouletteRulesText,
+  rouletteListText,
+  rouletteTopText,
+} from "./roulette.js";
 
 function shortHash(text) {
   let value = 2166136261;
@@ -197,6 +206,57 @@ export async function handleCallback(query, env) {
     return;
   }
 
+  // ── Рулетка: крутить/участвовать могут все, слово меняют редакторы ──
+  if (data.startsWith("r|")) {
+    const [, action] = data.split("|");
+    const mid = query.message.message_id;
+    const s = await getSettings(chatId, env);
+
+    if (action === "spin") {
+      await answerCallback(query.id, "Кручу рулетку...", env);
+      await spinRoulette(chatId, env);
+      return;
+    }
+
+    if (action === "join") {
+      // Тот же путь, что и /roulette_add без reply: добавляем нажавшего.
+      const fakeMessage = { from: query.from, chat: query.message?.chat };
+      const role = await getRole(chatId, userId, env);
+      await handleRouletteCommand("/roulette_add", "", fakeMessage, chatId, userId, role, env);
+      await answerCallback(query.id, "Вы в рулетке", env);
+      return;
+    }
+
+    if (action === "word") {
+      const role = await getRole(chatId, userId, env);
+      if (!canEdit(role)) {
+        await answerCallback(query.id, "⛔ Слово меняет администратор чата", env, true);
+        return;
+      }
+      await setPending(chatId, userId, "roulette_word", env);
+      await answerCallback(query.id, "Жду слово в двух формах", env);
+      await sendMessage(
+        chatId,
+        "🔤 Пришлите слово рулетки в двух формах, каждую с новой строки:\n" +
+          "1 — для «1 …» (единственное число)\n" +
+          "2 — для «5 …» и «Топ-10 …» (множественное число)\n\n" +
+          "<code>пов\nповов</code>\n\n" +
+          "<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>",
+        env,
+        { reply_markup: replyToThisKeyboard("пов / повов") }
+      );
+      return;
+    }
+
+    const text = action === "top" ? rouletteTopText(s)
+      : action === "rules" ? rouletteRulesText(s)
+      : action === "list" ? rouletteListText(s)
+      : rouletteHomeText(s);
+    await editMessage(chatId, mid, text, env, rouletteKeyboard());
+    await answerCallback(query.id, "", env);
+    return;
+  }
+
   // ── Режим пользовательского праздника: будний или выходной ───────────
   if (data.startsWith("h|")) {
     const role = await getRole(chatId, userId, env);
@@ -328,6 +388,8 @@ export async function handleCallback(query, env) {
         env,
         modelsKeyboard(getAllProviders(env), s.nimModel, stats)
       );
+    } else if (screen === "roulette") {
+      await editMessage(chatId, mid, rouletteHomeText(s), env, rouletteKeyboard());
     } else if (screen === "settings") {
       await editMessage(chatId, mid, settingsTextPublic(s, chatId, role), env, {
         inline_keyboard: [[{ text: "◀️ Назад в меню", callback_data: "nav|menu" }]],
