@@ -2157,7 +2157,9 @@ async function saveBirthdayWish(chatId, targetId, wish, env) {
   const birthdays = { ...(s.birthdays || {}) };
   const entry = birthdays[String(targetId)];
   if (!entry) return null;
-  if (wish) entry.wish = String(wish).slice(0, 300);
+  // Лимит с запасом: персональные поздравления бывают развёрнутыми,
+  // в стиле «ведрами вычерпывай». 300 символов обрезало их на полуслове.
+  if (wish) entry.wish = String(wish).slice(0, 800);
   else delete entry.wish;
   birthdays[String(targetId)] = entry;
   await patchSettings(chatId, { birthdays }, env);
