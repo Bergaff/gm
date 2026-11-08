@@ -165,7 +165,7 @@ export function rouletteRulesText(settings) {
     `1. В рулетке участвуют только те, кто записался. Самому — <code>/roulette_add</code>.`,
     "2. Другого человека может добавить администратор чата или владелец бота: нужно <b>ответить на сообщение этого человека</b> командой <code>/roulette_add</code>. Себя каждый добавляет сам.",
     "3. Рулетка крутится командой <code>/roulette</code> — <b>один раз в день</b> на весь чат. Кто первый нажал, тот и разбудил машины.",
-    `4. Бот случайно выбирает одного участника. Выпавший получает +1 в статистику: он теперь «${escapeHtml(one)} дня».`,
+    `4. Бот выбирает одного участника, и выпавший получает +1 в статистику: он теперь «${escapeHtml(one)} дня». Но есть изюминка: <b>рулетка подтягивает отстающих</b> — чем реже человек выпадал в этом году, тем выше его шанс. У лидера шанс меньше, поэтому явного фаворита надолго не бывает и таблица идёт нос в нос.`,
     `5. Статистика считается по годам. Лучшие видны в <code>/roulette_top</code> — «Топ-10 ${escapeHtml(many)} за текущий год».`,
     "6. Выйти из рулетки: <code>/roulette_remove</code>. Другого участника reply-командой может убрать админ или владелец.",
     `7. Слово рулетки (сейчас: «${escapeHtml(one)}» / «${escapeHtml(many)}») меняют админы командой <code>/roulette_word</code> — нужны формы для «1 …» и «5 …».`,
@@ -198,6 +198,38 @@ export function rouletteListText(settings) {
   ].join("\n");
 }
 
+// «Подтягивание» отстающих: шанс выпадения обратно пропорционален числу
+// побед в текущем году. У лидера шанс меньше, у тех, кто ещё не выпадал, —
+// максимальный. Так таблица не расползается, явного фаворита надолго не
+// появляется, и вся верхушка идёт нос в нос до конца года.
+export function catchUpWeight(winsThisYear) {
+  return 1 / (1 + Math.max(0, Number(winsThisYear) || 0));
+}
+
+export function pickWeightedWinner(people, yearWins = {}) {
+  const weights = people.map((p) => catchUpWeight(yearWins[p.id]));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let roll = Math.random() * total;
+  for (let i = 0; i < people.length; i++) {
+    roll -= weights[i];
+    if (roll <= 0) return people[i];
+  }
+  return people[people.length - 1];
+}
+
+// Живой комментарий к таблице: подсвечиваем интригу, а не «короля горы».
+function intrigueLine(rows) {
+  if (rows.length < 2) return "Соперников пока маловато — интрига только разогревается.";
+  const [first, second] = rows;
+  const gap = first.count - second.count;
+  if (gap === 0) return "👃 На вершине полное равенство — нос в нос, явного победителя нет и не предвидится.";
+  if (gap === 1) return "👃 Первое и второе место разделяет всего один шаг — идут нос в нос!";
+  const topFiveGap = first.count - rows[Math.min(4, rows.length - 1)].count;
+  if (topFiveGap <= 3) return "👃 Вся верхушка идёт плотной группой — один удачный день перетасует таблицу.";
+  if (gap >= 5) return "Лидер ушёл в отрыв, но праздновать рано: рулетка чаще подкидывает отстающих, камбэки тут обычное дело.";
+  return "Отрыв небольшой — пара удачных дней, и таблица перевернётся.";
+}
+
 export function rouletteTopText(settings, dateParts = null) {
   const roulette = normalizeRoulette(settings);
   const now = dateParts || rouletteNow();
@@ -225,7 +257,7 @@ export function rouletteTopText(settings, dateParts = null) {
       "",
       "Пока никто не выпадал. Рулетка ждёт первого героя.",
       "",
-      `Всего участников — ${total}.`,
+      `Всего участников — <i>${total}</i>.`,
       "Крутить: <code>/roulette</code>",
     ].join("\n");
   }
@@ -234,9 +266,12 @@ export function rouletteTopText(settings, dateParts = null) {
     `🏆 <b>Топ-10 ${escapeHtml(roulette.wordPlural)} за текущий год</b>`,
     "",
     ...rows.map((row, i) =>
-      `${i + 1}. ${escapeHtml(row.name)} — ${row.count} ${pluralizeRu(row.count, ["раз", "раза", "раз"])}`),
+      `<b>${i + 1}</b>. ${escapeHtml(row.name)} — <i>${row.count} ${pluralizeRu(row.count, ["раз", "раза", "раз"])}</i>`),
     "",
-    `Всего участников — ${total}.`,
+    `Всего участников — <i>${total}</i>.`,
+    "",
+    intrigueLine(rows),
+    "<i>Рулетка подтягивает отстающих: кто в этом году выпадал реже — у того шанс выше. Поэтому явного фаворита здесь надолго не бывает.</i>",
   ].join("\n");
 }
 
@@ -371,8 +406,12 @@ export async function spinRoulette(chatId, env, options = {}) {
   await env.BOT_KV.put(lockKey, "1", { expirationTtl: 120 });
 
   try {
-    const winner = pick(people);
-    const yearWins = { ...(roulette.wins[year] || {}) };
+    const beforeWins = { ...(roulette.wins[year] || {}) };
+    const leaderCount = Math.max(0, ...people.map((p) => Number(beforeWins[p.id]) || 0));
+    // Не чистый рандом: отстающих подтягиваем (см. catchUpWeight).
+    const winner = pickWeightedWinner(people, beforeWins);
+    const wasUnderdog = (Number(beforeWins[winner.id]) || 0) + 3 <= leaderCount;
+    const yearWins = { ...beforeWins };
     yearWins[winner.id] = (Number(yearWins[winner.id]) || 0) + 1;
     roulette.wins = { ...roulette.wins, [year]: yearWins };
     roulette.last = {
@@ -401,7 +440,8 @@ export async function spinRoulette(chatId, env, options = {}) {
       `${pick(SPIN_FINALS)}\n\n` +
         `🎉 <b>${escapeHtml(capitalize(roulette.wordSingular))} дня обыкновенный, 1 шт.</b> — ${mention(winner)}\n\n` +
         `В этом году это уже ${yearWins[winner.id]} ${pluralizeRu(yearWins[winner.id], ["раз", "раза", "раз"])}. ` +
-        `Всего участников — ${people.length}.`,
+        `Всего участников — ${people.length}.` +
+        (wasUnderdog ? "\n\n👃 Камбэк засчитан: отстающие в этой рулетке не декорация — их подтягивает к лидерам." : ""),
       rouletteKeyboard()
     );
 
