@@ -1992,7 +1992,11 @@ async function applyPendingValue(pending, text, chatId, env) {
 
     case "birthday_wish": {
       if (!pending.targetId) return;
-      const saved = await saveBirthdayWish(chatId, pending.targetId, text, env);
+      // Секретный режим из лички: текст пишется в личке, а сохраняется
+      // в целевой групповой чат (pending.targetChatId). В самом чате
+      // ничего не появляется — именинник увидит текст только в свой день.
+      const targetChatId = pending.targetChatId || chatId;
+      const saved = await saveBirthdayWish(targetChatId, pending.targetId, text, env);
       if (!saved) {
         await sendMessage(chatId, "Не нашёл день рождения для этого человека. Сначала: <code>/birthday ДД.ММ</code>", env);
         return;
@@ -2000,7 +2004,7 @@ async function applyPendingValue(pending, text, chatId, env) {
       const at = saved.username ? "@" + saved.username : saved.name || pending.targetId;
       await sendMessage(
         chatId,
-        `✅ Персональное поздравление сохранено.\n\n🎂 ${escapeHtml(renderBirthdayWish({ ...saved, id: String(pending.targetId), at }))}`,
+        `✅ Персональное поздравление сохранено. Именинник его пока не видит — оно появится только в утреннем поздравлении.\n\n🎂 ${escapeHtml(renderBirthdayWish({ ...saved, id: String(pending.targetId), at }))}`,
         env
       );
       return;
@@ -2202,6 +2206,7 @@ async function sendAllBirthdays(chatId, env) {
   lines.push(`Всего людей: <b>${total}</b> · чатов с днями рождения: <b>${chatsWith}</b>`);
   lines.push("");
   lines.push("Персональное поздравление: reply на человека + <code>/birthday_wish текст</code> (или себе — без reply).");
+  lines.push("🤫 Сюрприз без спойлеров: напишите боту <b>в личку</b> <code>/birthday_wish</code> — выберите человека кнопкой и пришлите текст там. В чате он ничего не увидит до самого дня рождения.");
 
   // Telegram режет сообщения на 4096 символов — шлём кусками по строкам.
   let chunk = "";
@@ -2215,7 +2220,85 @@ async function sendAllBirthdays(chatId, env) {
   if (chunk) await sendMessage(chatId, chunk, env);
 }
 
+// 🤫 Секретная подготовка поздравления из лички с ботом.
+// Показывает кнопки всех именинников из чатов, где пользователь может
+// задавать поздравления (владелец бота / админ чата, либо сам именинник).
+// Текст потом пишется ответом в личке и тихо сохраняется в целевой чат:
+// в самом чате ничего не публикуется до утра дня рождения.
+async function sendBirthdayWishPicker(chatId, userId, env) {
+  const chatIds = await listChats(env).catch(() => []);
+  const rows = [];
+  const lines = [];
+
+  for (const id of chatIds) {
+    if (String(id) === String(chatId)) continue; // сама личка не нужна
+    const s = await getSettings(id, env).catch(() => null);
+    const entries = Object.entries(s?.birthdays || {})
+      .sort((a, b) => String(a[1].date).localeCompare(String(b[1].date)));
+    if (!entries.length) continue;
+
+    const chatRole = await getRole(id, userId, env).catch(() => "user");
+    for (const [targetId, b] of entries) {
+      if (!canGrant(chatRole) && String(targetId) !== String(userId)) continue;
+      const name = b.username ? "@" + b.username : b.name || targetId;
+      lines.push(`• <b>${formatBirthdayDate(b.date)}</b> — ${escapeHtml(name)} · ${escapeHtml(s.title || id)}${b.wish ? " · ✍️ уже задано" : ""}`);
+      rows.push([{
+        text: `🎂 ${formatBirthdayDate(b.date)} · ${String(b.username || b.name || targetId).slice(0, 18)} · ${String(s.title || id).slice(0, 18)}`,
+        callback_data: `bw|pick|${id}|${targetId}`,
+      }]);
+    }
+  }
+
+  if (!rows.length) {
+    await sendMessage(
+      chatId,
+      "Пока некому готовить секретное поздравление.\n\nСначала в нужном чате должен быть указан день рождения: <code>/birthday ДД.ММ</code> (свой) или reply + <code>/birthday ДД.ММ</code> (админ/владелец). Потом приходите сюда, в личку, и жмите /birthday_wish.",
+      env
+    );
+    return;
+  }
+
+  await sendMessage(
+    chatId,
+    [
+      "🤫 <b>Секретное персональное поздравление</b>",
+      "",
+      "Выберите именинника кнопкой ниже. Дальше бот попросит текст — вы напишете его <b>здесь, в личке</b>.",
+      "В чате ничего не появится: человек увидит поздравление только утром в свой день рождения.",
+      "",
+      ...lines.slice(0, 30),
+    ].join("\n"),
+    env,
+    { reply_markup: { inline_keyboard: rows.slice(0, 30) } }
+  );
+}
+
 async function handleBirthdayCommand(command, value, message, chatId, userId, role, env) {
+  // 🤫 Личка с ботом: поздравление готовится тайно от именинника.
+  // /birthday_wish — выбор человека кнопками; прямой формат для владельца:
+  // /birthday_wish <chatId> <userId> <текст> (id видны в /birthdays_all).
+  if (command === "/birthday_wish" && message.chat?.type === "private") {
+    const direct = /^(-?\d{5,})\s+(\d{3,})\s+([\s\S]+)$/.exec(value || "");
+    if (direct) {
+      const [, targetChatId, targetUserId, wishText] = direct;
+      const targetRole = await getRole(targetChatId, userId, env).catch(() => "user");
+      if (!canGrant(targetRole) && String(targetUserId) !== String(userId)) {
+        await sendMessage(chatId, "⛔ Задавать поздравления в этом чате может его администратор или владелец бота.", env);
+        return;
+      }
+      const saved = await saveBirthdayWish(targetChatId, targetUserId, wishText, env);
+      if (!saved) {
+        await sendMessage(chatId, "Не нашёл у этого человека день рождения в указанном чате. Список: /birthdays_all", env);
+        return;
+      }
+      const at = saved.username ? "@" + saved.username : saved.name || targetUserId;
+      await sendMessage(chatId, `✅ Готово, секретно. Именинник увидит только в свой день рождения.\n\n🎂 ${escapeHtml(renderBirthdayWish({ ...saved, id: String(targetUserId), at }))}`, env);
+      return;
+    }
+    await sendBirthdayWishPicker(chatId, userId, env);
+    return;
+  }
+
   if (command === "/birthdays") {
     const s = await getSettings(chatId, env);
     const list = Object.entries(s.birthdays || {}).sort((a, b) => String(a[1].date).localeCompare(String(b[1].date)));
@@ -2636,6 +2719,7 @@ function helpText(role) {
     "/birthday 08.03 — reply на участника, если вы админ/владелец",
     "/birthdays — список этого чата (видно, кто добавил сам и у кого персональное поздравление)",
     "/birthday_wish текст — персональное поздравление вместо общего; себе или reply-цели (админ/владелец). {name} — обращение к имениннику",
+    "/birthday_wish — в личке с ботом: секретная подготовка поздравления кнопками, именинник не увидит до дня рождения",
     "/birthday_wish clear — убрать персональное поздравление",
     "/birthday_remove — удалить свой или reply-цель",
     "",

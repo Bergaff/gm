@@ -29,7 +29,7 @@ import {
   restartChat,
 } from "./commands.js";
 import { getSettings, patchSettings, listChats } from "./storage.js";
-import { getRole, canEdit } from "./access.js";
+import { getRole, canEdit, canGrant } from "./access.js";
 import { isAdmin } from "./config.js";
 import { setPending } from "./pending.js";
 import { NIM_PROVIDERS, getApiKeys, getAllProviders, markOpenRouterImageModelBad, openRouterModelFromTitle } from "./images/nim.js";
@@ -203,6 +203,42 @@ export async function handleCallback(query, env) {
     } finally {
       await releaseTestLock(env, acquired);
     }
+    return;
+  }
+
+  // ── Секретное персональное поздравление (выбор именинника в личке) ──
+  if (data.startsWith("bw|")) {
+    const [, action, targetChatId, targetUserId] = data.split("|");
+    if (action !== "pick") return;
+
+    const targetRole = await getRole(targetChatId, userId, env).catch(() => "user");
+    if (!canGrant(targetRole) && String(targetUserId) !== String(userId)) {
+      await answerCallback(query.id, "⛔ Поздравление в этом чате задаёт админ или владелец бота", env, true);
+      return;
+    }
+
+    const s = await getSettings(targetChatId, env).catch(() => null);
+    const entry = s?.birthdays?.[String(targetUserId)];
+    if (!entry) {
+      await answerCallback(query.id, "День рождения не найден — сначала /birthday в том чате", env, true);
+      return;
+    }
+
+    await setPending(chatId, userId, "birthday_wish", env, {
+      targetId: String(targetUserId),
+      targetChatId: String(targetChatId),
+    });
+    await answerCallback(query.id, "Пишите текст сюда, в личку", env);
+    const name = entry.username ? "@" + entry.username : entry.name || targetUserId;
+    await sendMessage(
+      chatId,
+      `🤫 Готовим секретное поздравление для <b>${escapeHtml(name)}</b> (${escapeHtml(s.title || targetChatId)}).\n\n` +
+        "Пришлите текст поздравления ответом на это сообщение. Можно с обращением: <code>{name}</code> подставится автоматически.\n\n" +
+        "В чате ничего не появится — именинник увидит текст только утром в свой день рождения.\n\n" +
+        "<b>Ответьте именно на это сообщение.</b>\n<i>/cancel — отмена</i>",
+      env,
+      { reply_markup: replyToThisKeyboard("Текст секретного поздравления") }
+    );
     return;
   }
 
