@@ -64,19 +64,21 @@ export const NIM_PROVIDERS = [
     id: "flux-schnell",
     title: "FLUX.1 schnell",
     url: `${BASE}/black-forest-labs/flux.1-schnell`,
+    // cfg_scale только 0: актуальная схема NIM для schnell отклоняет 3.5
+    // («Input should be less than or equal to 0» в /nim_health).
     build: (prompt, seed) => ({
-      prompt, mode: "base", cfg_scale: 3.5,
+      prompt, mode: "base", cfg_scale: 0,
       width: 1024, height: 1024, seed, steps: 4,
     }),
   },
   {
-    timeoutMs: 10000,
+    timeoutMs: 15000,
     id: "flux-dev",
     title: "FLUX.1 dev",
     url: `${BASE}/black-forest-labs/flux.1-dev`,
     build: (prompt, seed) => ({
       prompt, mode: "base", cfg_scale: 3.5,
-      width: 1024, height: 1024, seed, steps: 28,
+      width: 1024, height: 1024, seed, steps: 20,
     }),
   },
   {
