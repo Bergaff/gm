@@ -360,6 +360,16 @@ export function morningTestReport(result) {
     result.captionError
       ? `⚠️ AI-подпись: ${escapeHtml(captionPublicError)}`
       : null,
+    // Выбранная вручную модель не ответила, но сработала запасная:
+    // показываем честно, без сырых ошибок API.
+    result.provider && result.modelRequested && result.modelRequested !== "auto" && result.provider !== result.modelRequested
+      ? `ℹ️ Выбранная модель (<b>${escapeHtml(result.modelRequested)}</b>) не ответила — картинка сделана запасной: <b>${escapeHtml(result.provider)}</b>`
+      : null,
+    // Компактная сводка попыток для диагностики: провайдер и HTTP-статус,
+    // без тел ошибок. Видно, кто именно падает, прямо из /test.
+    result.attempts?.length
+      ? `Попытки: <code>${result.attempts.slice(0, 8).map((a) => `${escapeHtml(a.provider)}: ${a.ok ? "OK" : a.status || "—"}`).join(" · ")}</code>`
+      : null,
     result.error ? `\n⚠️ Картинка: ${escapeHtml(imagePublicError)}` : null,
   ].filter(Boolean).join("\n");
 
@@ -770,6 +780,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     postId,
     status,
     provider: image?.provider,
+    modelRequested: settings.nimModel || "auto",
     error,
     prompt: useNim ? activePrompt : useSearch ? (image?.query || searchQuery || rawPrompt) : null,
     promptOriginal: useNim && promptTranslated ? rawPrompt : null,
@@ -899,7 +910,7 @@ export function changeModelsText(env, title, current) {
       })() + "</b>");
 
   if (current !== "auto") {
-    lines.push("<i>Ручной выбор строгий: без тихой подмены на другую модель.</i>");
+    lines.push("<i>Выбранная модель пробуется первой. Если она недоступна, бот возьмёт запасную и честно покажет это в отчёте /test — утренняя картинка важнее.</i>");
   }
 
   lines.push("");
@@ -1072,7 +1083,7 @@ export function modelsText(providers, current, stats, keyCount) {
     ? "Сейчас: <b>Авто</b> — перебор всех с запасным вариантом"
     : `Сейчас: <b>${escapeHtml(getProviderTitle(providers, current))}</b>`);
   if (current !== "auto") {
-    lines.push("<i>Ручной выбор строгий: бот не будет молча заменять эту модель на Cloudflare/NVIDIA. Для перебора всех используйте Авто.</i>");
+    lines.push("<i>Выбранная модель пробуется первой. Если она недоступна, бот возьмёт запасную и покажет в /test, какая модель сработала. Строгий режим без подмены: секрет IMAGE_PINNED_STRICT=1.</i>");
   }
 
   return lines.join("\n");

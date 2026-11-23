@@ -770,6 +770,12 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
         return { ok: true, status: 200, latency: Date.now() - started,
                  bytes: new Uint8Array(buf), seed };
       }
+      // ...а некоторые — сразу бинарь без обёртки
+      if (out instanceof Uint8Array || out instanceof ArrayBuffer) {
+        await addUsage(env, estimateImageNeurons(provider.model), "image");
+        return { ok: true, status: 200, latency: Date.now() - started,
+                 bytes: out instanceof Uint8Array ? out : new Uint8Array(out), seed };
+      }
       return { ok: false, status: 0, latency: Date.now() - started,
                error: "Workers AI: нет изображения в ответе" };
     } catch (e) {
@@ -1009,20 +1015,25 @@ export async function generateImage(prompt, env, options = {}) {
     const pinned = getProvider(preferred, env);
     pinnedId = pinned.id;
 
-    // Если человек выбрал конкретную модель, не подменяем её молча другой.
-    // Раньше выбранный Gemini падал, после чего бот доходил до Cloudflare
-    // DreamShaper — в отчёте выглядело так, будто «Gemini использует
-    // DreamShaper». Теперь ручной выбор означает строгий выбор.
-    // Исключение: для Gemini можно перебрать только другие Gemini-image id
-    // из GEMINI_IMAGE_MODELS, но не уходить в Cloudflare/NVIDIA.
+    // Выбранная вручную модель пробуется ПЕРВОЙ, но если она недоступна,
+    // бот больше не остаётся без картинки на несколько дней подряд:
+    // после её отказа идём по обычному auto-пулу, а в отчёте честно
+    // показываем, какая модель в итоге сработала (result.provider).
+    // Строгий режим без подмены: IMAGE_PINNED_STRICT=1 или noFallback
+    // (диагностика /nim_health, которой нужна именно эта модель).
+    const strictPinned = noFallback || String(env.IMAGE_PINNED_STRICT || "") === "1";
     if (noFallback) {
       queue = [pinned];
     } else if (pinned.gemini) {
       queue = [pinned, ...all.filter((p) => p.gemini && p.id !== pinned.id)];
-    } else if (String(env.IMAGE_PINNED_FALLBACK || "") === "1") {
-      queue = [pinned, ...all.filter((p) => p.id !== pinned.id)];
-    } else {
+    } else if (strictPinned) {
       queue = [pinned];
+    } else {
+      const rest = all.filter((p) =>
+        p.id !== pinned.id && !p.gemini && !p.openrouter &&
+        (p.binding || p.custom || keys.length > 0));
+      const stats = await getAutoStats(env, chatId);
+      queue = [pinned, ...rankAutoProviders(rest, stats)];
     }
   } else {
     // Auto больше не ставит Cloudflare первым просто потому, что он бесплатный.
@@ -1051,12 +1062,16 @@ export async function generateImage(prompt, env, options = {}) {
     };
   }
 
-  for (const provider of queue) {
+  const skippedCooldown = [];
+
+  async function runQueue(list, ignoreCooldown) {
+  for (const provider of list) {
     // Закреплённую вручную модель пробуем всегда, даже после сбоя.
-    if (provider.id !== pinnedId && (await isCoolingDown(provider.id, env))) {
+    if (!ignoreCooldown && provider.id !== pinnedId && (await isCoolingDown(provider.id, env))) {
       // Это не запрос к модели, а локальный пропуск по cooldown. Не пишем его
       // в attempts/gen_log, иначе статистика «сбоев» раздувается: один
       // реальный 429 превращается в десятки псевдо-сбоев.
+      skippedCooldown.push(provider);
       continue;
     }
 
@@ -1133,6 +1148,19 @@ export async function generateImage(prompt, env, options = {}) {
       await markFailed(provider.id, env, result.status, result.error);
     }
   }
+  return null;
+  }
 
+  let finalResult = await runQueue(queue, false);
+
+  // Анти-тупик: если ВСЕ провайдеры оказались в локальном cooldown и ни
+  // одной реальной попытки не было, cooldown игнорируем и пробуем по-честному.
+  // Иначе одно неудачное утро теоретически запирало генерацию без единой
+  // записи в статистику попыток.
+  if (!finalResult && !attempts.length && skippedCooldown.length) {
+    finalResult = await runQueue(skippedCooldown, true);
+  }
+
+  if (finalResult) return finalResult;
   return { ok: false, attempts };
 }
