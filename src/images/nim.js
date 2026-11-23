@@ -60,8 +60,9 @@ function markKeyFailed(idx, env, status) {
  */
 export const NIM_PROVIDERS = [
   {
-    // Эндпоинт живой, но отвечает дольше 10-15 сек (таймауты в /nim_health):
-    // даём глубокий запас по времени, сама модель в хвосте очереди.
+    // Отключена по итогам /nim_health: эндпоинт стабильно висит дольше
+    // любых разумных таймаутов, а Cloudflare-пул быстрее и надёжнее.
+    disabled: true,
     timeoutMs: 45000,
     id: "flux-schnell",
     title: "FLUX.1 schnell",
@@ -281,8 +282,9 @@ export const CF_PROVIDERS = [
     },
   },
   {
-    // Leonardo Lucid Origin — самая «красивая» из бесплатных CF-моделей,
-    // но дорогая по нейронам: не на каждый день, а когда хочется качества.
+    // Отключена как лишняя: Phoenix даёт тот же класс качества дешевле
+    // по нейронам и быстрее, два Leonardo в пуле не нужны.
+    disabled: true,
     id: "cf-lucid",
     title: "Lucid Origin (Cloudflare, бесплатно)",
     binding: true,
