@@ -202,9 +202,43 @@ export function getAllProviders(env) {
     ...NIM_PROVIDERS,
     ...getHfProviders(env),
     ...(pollinationsEnabled(env) ? [pollinationsProvider()] : []),
+    ...(hordeEnabled(env) ? [hordeProvider()] : []),
     ...getOpenRouterProviders(env),
     ...getCustomProviders(env),
   ].filter((p) => showAll || !p.disabled);
+}
+
+// AI Horde: бесплатная очередь сообщества на чужих GPU. Ключ не нужен
+// (анонимный режим), но медленно: от десятков секунд до минут, поэтому
+// это глубокий запас, а не основа. Свой бесплатный ключ stablehorde.net
+// (секрет AIHORDE_API_KEY) заметно ускоряет очередь.
+export function hordeProvider() {
+  return {
+    id: "ai-horde",
+    title: "AI Horde SDXL (бесплатно, медленно)",
+    horde: true,
+    timeoutMs: 115000,
+    build: (prompt, seed) => ({
+      prompt,
+      params: {
+        n: 1,
+        width: 1024,
+        height: 1024,
+        steps: 24,
+        cfg_scale: 7,
+        sampler_name: "k_euler_a",
+        seed: String(seed),
+      },
+      models: ["AlbedoBase XL (SDXL)"],
+      nsfw: false,
+      censor_nsfw: true,
+      r2: true,
+    }),
+  };
+}
+
+function hordeEnabled(env) {
+  return String(env?.DISABLE_HORDE || "") !== "1";
 }
 
 // Pollinations (Classic API): бесплатная генерация картинок вообще без ключа
@@ -899,6 +933,65 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
     };
   }
 
+  // AI Horde — асинхронная очередь: постановка, ожидание, забор картинки.
+  if (provider.horde) {
+    const apiKey = env.AIHORDE_API_KEY || "0000000000";
+    const headers = {
+      apikey: apiKey,
+      "Client-Agent": "gm-bot:1.0:github.com/Bergaff/gm",
+      "Content-Type": "application/json",
+    };
+    const budgetEnd = Date.now() + Math.max(15000, fetchTimeout);
+    const submit = await fetch("https://stablehorde.net/api/v2/generate/async", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(provider.build(prompt, seed)),
+      signal: AbortSignal.timeout(20000),
+    }).catch((e) => ({ ok: false, status: 0, hordeError: e }));
+
+    if (!submit.ok) {
+      const body = submit.hordeError
+        ? String(submit.hordeError?.message || submit.hordeError)
+        : await submit.text().catch(() => "");
+      return { ok: false, status: submit.status || 0, latency: Date.now() - started, error: ("AI Horde: " + body).slice(0, 300) };
+    }
+
+    const { id } = await submit.json().catch(() => ({}));
+    if (!id) {
+      return { ok: false, status: 0, latency: Date.now() - started, error: "AI Horde: нет id задания" };
+    }
+
+    while (Date.now() < budgetEnd) {
+      await sleepMs(8000);
+      const check = await fetch(`https://stablehorde.net/api/v2/generate/check/${id}`, {
+        headers, signal: AbortSignal.timeout(15000),
+      }).catch(() => null);
+      const state = check?.ok ? await check.json().catch(() => null) : null;
+      if (state?.faulted) {
+        return { ok: false, status: 0, latency: Date.now() - started, error: "AI Horde: задание отклонено очередью" };
+      }
+      if (!state?.done) continue;
+
+      const done = await fetch(`https://stablehorde.net/api/v2/generate/status/${id}`, {
+        headers, signal: AbortSignal.timeout(15000),
+      }).catch(() => null);
+      const result = done?.ok ? await done.json().catch(() => null) : null;
+      const img = result?.generations?.[0]?.img;
+      if (!img) {
+        return { ok: false, status: 0, latency: Date.now() - started, error: "AI Horde: нет картинки в результате" };
+      }
+      const imageResponse = await fetch(img, { signal: AbortSignal.timeout(20000) }).catch(() => null);
+      if (!imageResponse?.ok) {
+        return { ok: false, status: 0, latency: Date.now() - started, error: "AI Horde: не скачать картинку" };
+      }
+      return {
+        ok: true, status: 200, latency: Date.now() - started,
+        bytes: new Uint8Array(await imageResponse.arrayBuffer()), seed,
+      };
+    }
+    return { ok: false, status: 0, latency: Date.now() - started, error: "AI Horde: очередь дольше лимита ожидания" };
+  }
+
   // Pollinations Classic API — простой GET, тело ответа = сама картинка.
   if (provider.pollinations) {
     const doFetch = () => fetch(provider.build(prompt, seed), {
@@ -1115,6 +1208,7 @@ function baseAutoPriority(provider) {
   if (id === "pollinations") return 82;
   if (id === "cf-lucid") return 78; // качество топ, но дорого по нейронам
   if (id === "hf-sd35-large") return 62; // медленно, но качественно: глубокий запас
+  if (id === "ai-horde") return 50; // бесплатно, но очередь: последний запас
   if (provider.custom) return 60;
   // NVIDIA genai-эндпоинты у пользователя стабильно висят до таймаута —
   // в самый хвост очереди и с коротким личным таймаутом (timeoutMs ниже).
@@ -1214,7 +1308,7 @@ export async function generateImage(prompt, env, options = {}) {
   const keys = getApiKeys(env);
   const hasCustom = getCustomProviders(env).length > 0 ||
     getCfProviders(env).length > 0 || getOpenRouterProviders(env).length > 0 ||
-    pollinationsEnabled(env);
+    pollinationsEnabled(env) || hordeEnabled(env);
 
   // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
   if (!keys.length && !hasCustom) {
@@ -1255,7 +1349,7 @@ export async function generateImage(prompt, env, options = {}) {
     } else {
       const rest = all.filter((p) =>
         p.id !== pinned.id && !p.gemini && !p.openrouter &&
-        (p.binding || p.custom || p.pollinations || keys.length > 0));
+        (p.binding || p.custom || p.pollinations || p.horde || keys.length > 0));
       const stats = await getAutoStats(env, chatId);
       queue = [pinned, ...rankAutoProviders(rest, stats)];
     }
@@ -1265,7 +1359,7 @@ export async function generateImage(prompt, env, options = {}) {
     // очередь не доходила. Теперь порядок адаптивный: новые/качественные модели
     // получают шанс, а модели с большим числом дизлайков/сбоев уходят в конец.
     const candidates = all.filter((p) =>
-      !p.gemini && !p.openrouter && (p.binding || p.custom || p.pollinations || keys.length > 0)
+      !p.gemini && !p.openrouter && (p.binding || p.custom || p.pollinations || p.horde || keys.length > 0)
     );
     const stats = await getAutoStats(env, chatId);
     queue = rankAutoProviders(candidates, stats);
