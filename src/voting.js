@@ -21,8 +21,6 @@ import {
   searchFallbackText,
   testPromptsKeyboard,
   testPromptsText,
-  sendMorning,
-  morningTestReport,
   pickPrompt,
   holidayModeKeyboard,
   replyToThisKeyboard,
@@ -36,6 +34,7 @@ import { NIM_PROVIDERS, getApiKeys, getAllProviders, markOpenRouterImageModelBad
 import { stylesKeyboard, stylesText, getStyle, STYLES } from "./styles.js";
 import { localParts, withChatHoliday } from "./scheduler.js";
 import { acquireTestLock, releaseTestLock } from "./testLock.js";
+import { queueTestJob } from "./testJob.js";
 import {
   spinRoulette,
   handleRouletteCommand,
@@ -187,52 +186,39 @@ export async function handleCallback(query, env) {
       return;
     }
 
-    await answerCallback(query.id, "Делаю тест", env);
-    const status = await sendMessage(chatId, `⏳ Тестирую промпт: <b>${label}</b>\n\n<i>${escapeHtml(prompt)}</i>`, env);
-    const mid = status?.result?.message_id;
-    const showFinal = async (finalText) => {
-      if (mid) {
-        const edited = await editMessage(chatId, mid, finalText, env);
-        if (!edited?.ok) await sendMessage(chatId, finalText, env);
-      } else {
-        await sendMessage(chatId, finalText, env);
-      }
-    };
+    // Тест НЕ выполняем прямо здесь: у webhook-воркера короткий запас
+    // времени после ответа Telegram, и тяжёлая генерация умирала молча,
+    // оставляя вечное «⏳ Тестирую...». Ставим задание в очередь —
+    // его в течение минуты подберёт cron и допишет результат сюда же.
+    await answerCallback(query.id, "Тест в очереди — результат в течение минуты", env);
+    const status = await sendMessage(
+      chatId,
+      `⏳ Тестирую промпт: <b>${label}</b>\n\n<i>${escapeHtml(prompt)}</i>\n\n` +
+        "<i>Генерация идёт отдельным заданием, результат появится здесь в течение минуты.</i>",
+      env
+    );
 
-    try {
-      // Жёсткий обрыв теста: раньше цепочка «подпись -> перевод -> очередь
-      // моделей -> запасные источники» могла висеть минутами, воркер умирал,
-      // а сообщение навсегда оставалось «⏳ Тестирую...». Теперь через
-      // TEST_TIMEOUT_MS (по умолчанию 90 сек) пользователь получает честный
-      // ответ, а замок теста снимается.
-      const timeoutMs = Number(env.TEST_TIMEOUT_MS) > 0 ? Number(env.TEST_TIMEOUT_MS) : 90000;
-      let timer = null;
-      const work = sendMorning(chatId, s, env, { test: true, forcePrompt: prompt })
-        .then((result) => ({ result }))
-        .catch((error) => ({ error }));
-      const raced = await Promise.race([
-        work,
-        new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), timeoutMs); }),
-      ]);
-      if (timer) clearTimeout(timer);
-
-      if (raced.timeout) {
-        await showFinal(
-          `⏱ <b>Тест оборван по таймауту (${Math.round(timeoutMs / 1000)} сек).</b>\n\n` +
-            "Провайдеры отвечали слишком долго, поэтому запрос остановлен, а не висит бесконечно.\n" +
-            "Что попробовать: ещё раз чуть позже, модель побыстрее в /models (например, Cloudflare FLUX) или режим «Авто».\n\n" +
-            "<i>Утренняя рассылка при этом не пострадала.</i>"
-        );
-        return;
-      }
-      if (raced.error) {
-        await showFinal("❌ Тест упал на нашей стороне. Попробуйте ещё раз; если повторяется — пришлите время теста, посмотрим логи.");
-        return;
-      }
-      await showFinal(morningTestReport(raced.result));
-    } finally {
+    const queued = await queueTestJob(env, {
+      chatId,
+      userId,
+      prompt,
+      label,
+      statusMessageId: status?.result?.message_id || null,
+    });
+    if (!queued.ok) {
       await releaseTestLock(env, acquired);
+      const mid = status?.result?.message_id;
+      const text = "⏳ В этом чате уже идёт другой тест. Дождитесь его результата.";
+      if (mid) {
+        const edited = await editMessage(chatId, mid, text, env);
+        if (!edited?.ok) await sendMessage(chatId, text, env);
+      } else {
+        await sendMessage(chatId, text, env);
+      }
     }
+    // Замок снимет cron после выполнения задания (processTestJobs),
+    // а если что-то пойдёт не так — сам замок протухнет по TTL.
+    return;
     return;
   }
 

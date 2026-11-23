@@ -24,6 +24,7 @@ import { localParts, parseTimeSpec, withChatHoliday } from "./scheduler.js";
 import { handleStatsCommand } from "./stats.js";
 import { usageText, getUsage, FREE_NEURONS_PER_DAY } from "./usage.js";
 import { clearTestLockForChat } from "./testLock.js";
+import { listTestJobs, deleteTestJob, clearTestJobForChat, TEST_JOB_TTL_MS } from "./testJob.js";
 import {
   parseExamples,
   getExamples,
@@ -1244,12 +1245,51 @@ export async function handleDocument(message, env, options = {}) {
   );
 }
 
+// Выполнение queued-тестов из cron: тяжёлая генерация живёт здесь,
+// а не в webhook-обработчике кнопки (см. src/testJob.js).
+export async function processTestJobs(env) {
+  const jobs = await listTestJobs(env).catch(() => []);
+  for (const job of jobs) {
+    const chatId = String(job.chatId);
+    try {
+      if (Date.now() - Number(job.createdAt || 0) > TEST_JOB_TTL_MS) {
+        await deleteTestJob(env, chatId).catch(() => null);
+        continue;
+      }
+      // Забираем задание до выполнения, чтобы соседний тик cron не взялся за то же.
+      await deleteTestJob(env, chatId).catch(() => null);
+
+      const s = await getSettings(chatId, env);
+      let finalText;
+      try {
+        const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: job.prompt });
+        finalText = morningTestReport(result);
+      } catch (e) {
+        console.log(`test job error chat=${chatId}:`, String(e));
+        finalText = "❌ Тест упал на нашей стороне. Попробуйте ещё раз; если повторяется — пришлите время теста, посмотрим логи.";
+      }
+
+      if (job.statusMessageId) {
+        const edited = await editMessage(chatId, job.statusMessageId, finalText, env).catch(() => null);
+        if (!edited?.ok) await sendMessage(chatId, finalText, env);
+      } else {
+        await sendMessage(chatId, finalText, env);
+      }
+    } catch (e) {
+      console.log(`test job error chat=${chatId}:`, String(e));
+    } finally {
+      await clearTestLockForChat(env, chatId).catch(() => null);
+    }
+  }
+}
+
 export async function restartChat(chatId, env) {
   const s = await getSettings(chatId, env);
   const now = localParts(s.timezone);
   const pendingDeleted = await clearPendingForChat(chatId, env).catch(() => 0);
 
   await clearTestLockForChat(env, chatId).catch(() => null);
+  await clearTestJobForChat(chatId, env).catch(() => null);
   await env.BOT_KV.delete(`sent:${chatId}:${now.date}`).catch(() => null);
   await patchSettings(chatId, { enabled: true }, env).catch(() => null);
 

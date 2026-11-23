@@ -1,5 +1,5 @@
 import { getSettings, listChats } from "./storage.js";
-import { sendMorning } from "./commands.js";
+import { sendMorning, processTestJobs } from "./commands.js";
 import { holidayName } from "./holidays.js";
 
 export function localParts(timeZone) {
@@ -117,6 +117,10 @@ export function targetMinute(chatId, dateKey, spec) {
 }
 
 export async function runScheduler(env) {
+  // Сначала queued-тесты /test: у cron времени достаточно, в отличие
+  // от webhook-обработчика кнопок, где воркер убивали на полуслове.
+  await processTestJobs(env).catch((e) => console.log("test jobs error:", String(e)));
+
   const chats = await listChats(env);
 
   for (const chatId of chats) {

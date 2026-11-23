@@ -187,9 +187,29 @@ export function getAllProviders(env) {
   return [
     ...getCfProviders(env),
     ...NIM_PROVIDERS,
+    ...(pollinationsEnabled(env) ? [pollinationsProvider()] : []),
     ...getOpenRouterProviders(env),
     ...getCustomProviders(env),
   ].filter((p) => showAll || !p.disabled);
+}
+
+// Pollinations (Classic API): бесплатная генерация картинок вообще без ключа
+// и регистрации — GET image.pollinations.ai/prompt/<текст>. Модель одна
+// (FLUX), лимит бережный (один запрос с IP за раз) — для 3-5 картинок
+// в день хватает с запасом. Отключить: секрет DISABLE_POLLINATIONS=1.
+export function pollinationsProvider() {
+  return {
+    id: "pollinations",
+    title: "Pollinations FLUX (бесплатно, без ключа)",
+    pollinations: true,
+    build: (prompt, seed) =>
+      `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+      `?model=flux&width=1024&height=1024&seed=${seed}&nologo=true&safe=true`,
+  };
+}
+
+function pollinationsEnabled(env) {
+  return String(env?.DISABLE_POLLINATIONS || "") !== "1";
 }
 
 /**
@@ -749,6 +769,25 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
     };
   }
 
+  // Pollinations Classic API — простой GET, тело ответа = сама картинка.
+  if (provider.pollinations) {
+    const response = await fetch(provider.build(prompt, seed), {
+      signal: AbortSignal.timeout(fetchTimeout),
+    }).catch((e) => ({ ok: false, status: 0, pollinationsError: e }));
+    const latency = Date.now() - started;
+    if (!response.ok) {
+      const body = response.pollinationsError
+        ? String(response.pollinationsError?.message || response.pollinationsError)
+        : await response.text().catch(() => "");
+      return { ok: false, status: response.status || 0, latency, error: String(body).slice(0, 300) };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 1000) {
+      return { ok: false, status: response.status, latency, error: "Pollinations: пустой ответ" };
+    }
+    return { ok: true, status: 200, latency, bytes, seed };
+  }
+
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
   if (provider.binding) {
     try {
@@ -910,6 +949,7 @@ async function getAutoStats(env, chatId, days = 14) {
 
 function baseAutoPriority(provider) {
   const id = provider.id;
+  if (id === "pollinations") return 80;
   // Быстрые и надёжные — первыми: CF FLUX schnell отвечает за секунды и
   // бесплатен. NVIDIA flux-dev (28 шагов) регулярно упирается в таймаут
   // запроса и раньше съедал по 20 секунд в начале каждой очереди, из-за
@@ -1003,7 +1043,8 @@ export async function generateImage(prompt, env, options = {}) {
 
   const keys = getApiKeys(env);
   const hasCustom = getCustomProviders(env).length > 0 ||
-    getCfProviders(env).length > 0 || getOpenRouterProviders(env).length > 0;
+    getCfProviders(env).length > 0 || getOpenRouterProviders(env).length > 0 ||
+    pollinationsEnabled(env);
 
   // Ключи NVIDIA не обязательны, если добавлен свой провайдер со своим ключом.
   if (!keys.length && !hasCustom) {
@@ -1044,7 +1085,7 @@ export async function generateImage(prompt, env, options = {}) {
     } else {
       const rest = all.filter((p) =>
         p.id !== pinned.id && !p.gemini && !p.openrouter &&
-        (p.binding || p.custom || keys.length > 0));
+        (p.binding || p.custom || p.pollinations || keys.length > 0));
       const stats = await getAutoStats(env, chatId);
       queue = [pinned, ...rankAutoProviders(rest, stats)];
     }
@@ -1054,7 +1095,7 @@ export async function generateImage(prompt, env, options = {}) {
     // очередь не доходила. Теперь порядок адаптивный: новые/качественные модели
     // получают шанс, а модели с большим числом дизлайков/сбоев уходят в конец.
     const candidates = all.filter((p) =>
-      !p.gemini && !p.openrouter && (p.binding || p.custom || keys.length > 0)
+      !p.gemini && !p.openrouter && (p.binding || p.custom || p.pollinations || keys.length > 0)
     );
     const stats = await getAutoStats(env, chatId);
     queue = rankAutoProviders(candidates, stats);
