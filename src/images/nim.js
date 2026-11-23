@@ -189,7 +189,7 @@ function fillTemplate(node, prompt, seed) {
 }
 
 export const DEEPINFRA_PROVIDER_ID = "deepinfra-flux2-klein";
-export const PAID_TEST_DAILY_LIMIT = 5;
+export const PAID_TEST_DAILY_LIMIT = 3;
 
 // DeepInfra — купленная платная генерация FLUX.2 Klein 4B.
 // По утрам (usage="morning") идёт первой в auto-очереди; в тестах
@@ -783,33 +783,13 @@ async function cfMultipartInput(provider, prompt, seed, negative) {
   };
 }
 
-// Hugging Face Inference Providers: токен HF_API_KEY.
-// Собственный hf-inference закрыт и для FLUX, и для SD 3.5 («Model not
-// supported by provider hf-inference»), поэтому идём через партнёра fal-ai
-// официальным маршрутом роутера: /fal-ai/<providerModelId> (двойной
-// fal-ai — не опечатка). Ответ fal — JSON с images[0].url.
-// ВАЖНО про деньги: роутер списывает кредиты HF-аккаунта. На бесплатном
-// тарифе их символически хватает на несколько картинок, дальше 402.
+// Hugging Face для картинок убран совсем: собственный hf-inference закрыт,
+// а роутер через партнёров требует предоплаченные кредиты («Purchase
+// pre-paid credits» в /nim_health). SD 3.5 Large пользователю за деньги
+// не нужен — платную роль выполняет DeepInfra, бесплатную — Cloudflare.
+// Функцию оставляем пустой для совместимости импортов/вызовов.
 export function getHfProviders(env) {
-  if (!env?.HF_API_KEY) return [];
-  return [{
-    id: "hf-sd35-large",
-    title: "SD 3.5 Large (HuggingFace via fal)",
-    custom: true,
-    format: "json",
-    keyEnv: "HF_API_KEY",
-    timeoutMs: 100000,
-    url: "https://router.huggingface.co/fal-ai/fal-ai/stable-diffusion-v35-large",
-    build: (prompt, seed) => ({
-      prompt,
-      seed,
-      image_size: { width: 1024, height: 1024 },
-      num_inference_steps: 28,
-      guidance_scale: 4.5,
-      num_images: 1,
-      output_format: "png",
-    }),
-  }];
+  return [];
 }
 
 
@@ -1288,7 +1268,6 @@ function baseAutoPriority(provider) {
   if (id === "cf-phoenix") return 88;
   if (id === "pollinations") return 82;
   if (id === "cf-lucid") return 78; // качество топ, но дорого по нейронам
-  if (id === "hf-sd35-large") return 62; // медленно, но качественно: глубокий запас
   if (id === "ai-horde") return 50; // бесплатно, но очередь: последний запас
   if (provider.custom) return 60;
   // NVIDIA genai-эндпоинты у пользователя стабильно висят до таймаута —

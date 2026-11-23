@@ -1121,7 +1121,7 @@ export function modelsText(providers, current, stats, keyCount) {
     const st = stats[p.id];
     const mark = p.id === current ? "✅ " : "";
     lines.push(`${mark}<b>Модель ${i + 1}</b> — ${escapeHtml(p.title)}`);
-    if (p.paid) lines.push("   <i>💳 платная: по утрам приоритет; платные тесты — не более 5 в день</i>");
+    if (p.paid) lines.push("   <i>💳 платная: по утрам приоритет; платные тесты — не более 3 в день</i>");
     if (st) {
       const total = st.likes + st.dislikes;
       const rate = total ? Math.round((st.likes / total) * 100) + "%" : "—";
