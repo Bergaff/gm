@@ -98,7 +98,7 @@ export async function listImages(folderId, env, force = false) {
     "&includeItemsFromAllDrives=true" +
     `&key=${env.GOOGLE_API_KEY}`;
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(12000) });
 
   if (!response.ok) {
     const body = await response.text();
@@ -152,7 +152,7 @@ export async function downloadImage(fileId, env) {
     `https://www.googleapis.com/drive/v3/files/${fileId}` +
     `?alt=media&supportsAllDrives=true&key=${env.GOOGLE_API_KEY}`;
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
 
   if (!response.ok) {
     const body = await response.text();

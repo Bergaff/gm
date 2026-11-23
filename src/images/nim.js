@@ -601,7 +601,8 @@ export function base64ToBytes(base64) {
   return bytes;
 }
 
-async function callProvider(provider, prompt, env, apiKey, negative = "") {
+async function callProvider(provider, prompt, env, apiKey, negative = "", timeoutMs = TIMEOUT_MS) {
+  const fetchTimeout = Math.max(1000, Math.min(TIMEOUT_MS, Number(timeoutMs) || TIMEOUT_MS));
   const seed = Math.floor(Math.random() * 2 ** 31);
   const started = Date.now();
 
@@ -804,7 +805,7 @@ async function callProvider(provider, prompt, env, apiKey, negative = "") {
     method: "POST",
     headers,
     body: JSON.stringify(provider.build(prompt, seed)),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(fetchTimeout),
   });
 
   const latency = Date.now() - started;
@@ -909,12 +910,16 @@ async function getAutoStats(env, chatId, days = 14) {
 
 function baseAutoPriority(provider) {
   const id = provider.id;
-  if (id === "flux-dev") return 100;
+  // Быстрые и надёжные — первыми: CF FLUX schnell отвечает за секунды и
+  // бесплатен. NVIDIA flux-dev (28 шагов) регулярно упирается в таймаут
+  // запроса и раньше съедал по 20 секунд в начале каждой очереди, из-за
+  // чего тесты висели, а до рабочих моделей очередь не доходила.
+  if (id === "cf-flux") return 95;
   if (id === "flux-schnell") return 85;
   if (id === "cf-dreamshaper") return 70;
-  if (id === "cf-flux") return 45;
-  if (id === "sd3-medium") return 40;
   if (provider.custom) return 60;
+  if (id === "flux-dev") return 55;
+  if (id === "sd3-medium") return 40;
   return 50;
 }
 
@@ -977,7 +982,15 @@ export async function generateImage(prompt, env, options = {}) {
     chatId = null,
     noFallback = false,
     negative = "",
+    deadlineMs = 150000,
   } = options;
+
+  // Общий дедлайн на всю очередь провайдеров: раньше каждый провайдер мог
+  // висеть по 20 секунд, очередь из 6-7 моделей плюс перебор ключей давал
+  // минуты молчания, и воркер умирал раньше отчёта («тест висит 10 минут»).
+  const genStartedAt = Date.now();
+  const genDeadline = Number(deadlineMs) > 0 ? Number(deadlineMs) : 150000;
+  const remainingMs = () => genDeadline - (Date.now() - genStartedAt);
 
   // Пустой промпт — модели вернут мусор или ошибку. Отсекаем сразу.
   if (!String(prompt || "").trim()) {
@@ -1063,9 +1076,20 @@ export async function generateImage(prompt, env, options = {}) {
   }
 
   const skippedCooldown = [];
+  let deadlineNoted = false;
 
   async function runQueue(list, ignoreCooldown) {
   for (const provider of list) {
+    if (remainingMs() <= 0) {
+      if (!deadlineNoted) {
+        deadlineNoted = true;
+        attempts.push({
+          provider: "deadline", ok: false, status: 0, latency: 0,
+          error: `Превышен общий лимит генерации ${Math.round(genDeadline / 1000)} сек — остальные модели не пробовали`,
+        });
+      }
+      return null;
+    }
     // Закреплённую вручную модель пробуем всегда, даже после сбоя.
     if (!ignoreCooldown && provider.id !== pinnedId && (await isCoolingDown(provider.id, env))) {
       // Это не запрос к модели, а локальный пропуск по cooldown. Не пишем его
@@ -1078,7 +1102,7 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative);
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(TIMEOUT_MS, remainingMs())));
 
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
@@ -1087,7 +1111,7 @@ export async function generateImage(prompt, env, options = {}) {
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
           keyIndex = nextIndex;
-          result = await callProvider(provider, prompt, env, keys[keyIndex], negative);
+          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(TIMEOUT_MS, remainingMs())));
         }
       }
     } catch (error) {

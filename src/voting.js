@@ -189,17 +189,47 @@ export async function handleCallback(query, env) {
 
     await answerCallback(query.id, "Делаю тест", env);
     const status = await sendMessage(chatId, `⏳ Тестирую промпт: <b>${label}</b>\n\n<i>${escapeHtml(prompt)}</i>`, env);
-
-    try {
-      const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: prompt });
-      const finalText = morningTestReport(result);
-      const mid = status?.result?.message_id;
+    const mid = status?.result?.message_id;
+    const showFinal = async (finalText) => {
       if (mid) {
         const edited = await editMessage(chatId, mid, finalText, env);
         if (!edited?.ok) await sendMessage(chatId, finalText, env);
       } else {
         await sendMessage(chatId, finalText, env);
       }
+    };
+
+    try {
+      // Жёсткий обрыв теста: раньше цепочка «подпись -> перевод -> очередь
+      // моделей -> запасные источники» могла висеть минутами, воркер умирал,
+      // а сообщение навсегда оставалось «⏳ Тестирую...». Теперь через
+      // TEST_TIMEOUT_MS (по умолчанию 90 сек) пользователь получает честный
+      // ответ, а замок теста снимается.
+      const timeoutMs = Number(env.TEST_TIMEOUT_MS) > 0 ? Number(env.TEST_TIMEOUT_MS) : 90000;
+      let timer = null;
+      const work = sendMorning(chatId, s, env, { test: true, forcePrompt: prompt })
+        .then((result) => ({ result }))
+        .catch((error) => ({ error }));
+      const raced = await Promise.race([
+        work,
+        new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), timeoutMs); }),
+      ]);
+      if (timer) clearTimeout(timer);
+
+      if (raced.timeout) {
+        await showFinal(
+          `⏱ <b>Тест оборван по таймауту (${Math.round(timeoutMs / 1000)} сек).</b>\n\n` +
+            "Провайдеры отвечали слишком долго, поэтому запрос остановлен, а не висит бесконечно.\n" +
+            "Что попробовать: ещё раз чуть позже, модель побыстрее в /models (например, Cloudflare FLUX) или режим «Авто».\n\n" +
+            "<i>Утренняя рассылка при этом не пострадала.</i>"
+        );
+        return;
+      }
+      if (raced.error) {
+        await showFinal("❌ Тест упал на нашей стороне. Попробуйте ещё раз; если повторяется — пришлите время теста, посмотрим логи.");
+        return;
+      }
+      await showFinal(morningTestReport(raced.result));
     } finally {
       await releaseTestLock(env, acquired);
     }

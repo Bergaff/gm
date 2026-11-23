@@ -570,6 +570,8 @@ export async function sendMorning(chatId, settings, env, options = {}) {
         preferred: settings.nimModel,
         chatId,
         negative,
+        // Тест не должен висеть минутами: жёсткий общий лимит на очередь.
+        deadlineMs: test ? 75000 : 240000,
       });
       attempts = result.attempts || [];
       if (result.ok) image = result;
@@ -613,6 +615,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       preferred: settings.nimModel,
       chatId,
       negative: fallbackNegative,
+      deadlineMs: test ? 75000 : 240000,
     });
     attempts = attempts.concat(result.attempts || []);
     if (result.ok) {
@@ -674,6 +677,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
           preferred: settings.nimModel,
           chatId,
           negative: fallbackNegative,
+          deadlineMs: test ? 75000 : 240000,
         });
         attempts = attempts.concat(result.attempts || []);
         if (result.ok) {
