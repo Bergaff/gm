@@ -14,7 +14,7 @@ function padEnd(text, length) {
     : value + " ".repeat(length - value.length);
 }
 
-export async function handleStatsCommand(command, value, chatId, env) {
+export async function handleStatsCommand(command, value, chatId, env, options = {}) {
   const days = Number(value) > 0 ? Number(value) : 30;
 
   switch (command) {
@@ -24,7 +24,7 @@ export async function handleStatsCommand(command, value, chatId, env) {
     case "/stats_recent":  return recent(chatId, Number(value) || 10, env);
     case "/stats_post":    return postDetails(chatId, value.trim(), env);
     case "/stats_errors":  return errors(chatId, Number(value) || 10, env);
-    case "/nim_health":    return health(chatId, env);
+    case "/nim_health":    return health(chatId, env, options);
     case "/chats":         return chatsList(chatId, env);
     case "/export_csv":    return exportCsv(chatId, days, env);
   }
@@ -243,7 +243,7 @@ async function errors(chatId, limit, env) {
   return sendMessage(chatId, `🐛 <b>Последние ошибки</b>\n\n${lines.join("\n\n")}`, env);
 }
 
-async function health(chatId, env) {
+async function health(chatId, env, options = {}) {
   await sendMessage(chatId, "🩺 Проверяю все модели NIM, это займёт до минуты…", env);
 
   const prompt = "a simple bright sunrise over hills, minimal, clean";
@@ -260,6 +260,8 @@ async function health(chatId, env) {
           preferred: provider.id,
           noFallback: true,
           usage: "test",
+          // /nim_health запускает только владелец — ему платный лимит не нужен.
+          paidUnlimited: Boolean(options.paidUnlimited),
         });
         const ok = result.ok && result.provider === provider.id;
         const attempt = result.attempts?.find((a) => a.provider === provider.id);

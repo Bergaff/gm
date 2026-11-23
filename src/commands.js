@@ -1,5 +1,6 @@
 import {
   DEFAULT_SETTINGS,
+  isAdmin,
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
   WEEKDAY_SECOND,
@@ -356,7 +357,7 @@ export function morningTestReport(result) {
   const captionPublicError = publicGenerationError(result.captionError);
   const imagePublicError = publicGenerationError(result.error);
   const paidAttempt = [...(result.attempts || [])].reverse()
-    .find((a) => a.paidTestLimit !== undefined);
+    .find((a) => a.paidTestLimit !== undefined || a.paidUnlimited);
   const requestedModel = result.modelRequested;
   const requestedFailed = requestedModel && requestedModel !== "auto" &&
     (result.modelAttemptFailed ??
@@ -402,7 +403,9 @@ export function morningTestReport(result) {
       ? `Попытки: <code>${result.attempts.slice(0, 8).map((a) => `${escapeHtml(a.provider)}: ${attemptTag(a)}`).join(" · ")}</code>`
       : null,
     paidAttempt
-      ? `Платные тесты (${escapeHtml(paidAttempt.provider)}): <b>${paidAttempt.paidTestCount}/${paidAttempt.paidTestLimit}</b> за сегодня`
+      ? (paidAttempt.paidUnlimited
+        ? `Платные тесты (${escapeHtml(paidAttempt.provider)}): <b>без лимита для владельца</b>`
+        : `Платные тесты (${escapeHtml(paidAttempt.provider)}): <b>${paidAttempt.paidTestCount}/${paidAttempt.paidTestLimit}</b> за сегодня`)
       : null,
     result.error ? `\n⚠️ Картинка: ${escapeHtml(imagePublicError)}` : null,
   ].filter(Boolean).join("\n");
@@ -466,7 +469,11 @@ export async function sendMorning(chatId, settings, env, options = {}) {
   // forcePrompt: /test заранее показывает промпт пользователю и передаёт
   // его сюда. Без этого pickPrompt вызывался дважды и случайно выбирал
   // РАЗНЫЕ промпты — в превью один, в генерации другой.
-  const { test = false, forcePrompt = null } = options;
+  const { test = false, forcePrompt = null, requesterId = null } = options;
+
+  // Владелец бота (ADMIN_IDS) тестирует платную генерацию без дневного
+  // лимита; остальным в /test доступно не более 3 платных вызовов в день.
+  const paidUnlimited = Boolean(test && isAdmin(requesterId));
 
   const now = withChatHoliday(localParts(settings.timezone), settings);
   const birthdaysToday = birthdayPeople(settings, now.date);
@@ -612,6 +619,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
         deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
         usage: test ? "test" : "morning",
+        paidUnlimited,
       });
       attempts = result.attempts || [];
       if (result.ok) image = result;
@@ -658,6 +666,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
         usage: test ? "test" : "morning",
+        paidUnlimited,
     });
     attempts = attempts.concat(result.attempts || []);
     if (result.ok) {
@@ -722,6 +731,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
           deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
         usage: test ? "test" : "morning",
+        paidUnlimited,
         });
         attempts = attempts.concat(result.attempts || []);
         if (result.ok) {
@@ -1121,7 +1131,7 @@ export function modelsText(providers, current, stats, keyCount) {
     const st = stats[p.id];
     const mark = p.id === current ? "✅ " : "";
     lines.push(`${mark}<b>Модель ${i + 1}</b> — ${escapeHtml(p.title)}`);
-    if (p.paid) lines.push("   <i>💳 платная: по утрам приоритет; платные тесты — не более 3 в день</i>");
+    if (p.paid) lines.push("   <i>💳 платная: по утрам приоритет; платные тесты — не более 3 в день, владельцу — без лимита</i>");
     if (st) {
       const total = st.likes + st.dislikes;
       const rate = total ? Math.round((st.likes / total) * 100) + "%" : "—";
@@ -1312,7 +1322,11 @@ export async function processTestJobs(env) {
       const s = await getSettings(chatId, env);
       let finalText;
       try {
-        const result = await sendMorning(chatId, s, env, { test: true, forcePrompt: job.prompt });
+        const result = await sendMorning(chatId, s, env, {
+          test: true,
+          forcePrompt: job.prompt,
+          requesterId: job.userId || null,
+        });
         finalText = morningTestReport(result);
       } catch (e) {
         console.log(`test job error chat=${chatId}:`, String(e));
@@ -1486,7 +1500,7 @@ export async function handleCommand(message, env, options = {}) {
       }
       return;
     }
-    await handleStatsCommand(command, value, chatId, env);
+    await handleStatsCommand(command, value, chatId, env, { paidUnlimited: role === "owner" });
     return;
   }
 

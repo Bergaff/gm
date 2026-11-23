@@ -188,23 +188,21 @@ function fillTemplate(node, prompt, seed) {
   return node;
 }
 
-export const DEEPINFRA_PROVIDER_ID = "deepinfra-flux2-klein";
+export const DEEPINFRA_PROVIDER_ID = "deepinfra-p-image";
 export const PAID_TEST_DAILY_LIMIT = 3;
 
-// DeepInfra — купленная платная генерация FLUX.2 Klein 4B.
-// По утрам (usage="morning") идёт первой в auto-очереди; в тестах
-// (usage="test" и /nim_health) действует жёсткий лимит платных вызовов.
-// SDK не тянем: Worker ходит в тот же REST endpoint обычным fetch.
-//
-// Размер по умолчанию 768x768, а не 1024x1024: DeepInfra берёт
-// $0.014 * (width/1024) * (height/1024), поэтому 768x768 стоит ~$0.0079
-// вместо $0.014 (-44%). Для Telegram этого достаточно: sendPhoto всё
-// равно пережимает картинку под показ в чате, исходные 1024 там не видны.
-// Вернуть максимум: DEEPINFRA_IMAGE_SIZE=1024; ещё дешевле: 512 (~$0.0035).
+// DeepInfra — платная генерация PrunaAI/p-image ($0.005 за картинку,
+// фиксированная цена, от размера не зависит). Заменяет FLUX.2 Klein 4B,
+// который DeepInfra считал по мегапикселям (~$0.014 за 1024x1024 и ~$0.0079
+// за 768x768). По утрам (usage="morning") идёт первой в auto-очереди;
+// в тестах (usage="test" и /nim_health) действует лимит платных вызовов:
+// не более 3 в день на бота, владельцу бота (paidUnlimited) — без лимита.
+// SDK не тянем: Worker ходит в OpenAI-совместимый endpoint обычным fetch,
+// ответ — data[0].b64_json, его уже умеет разбирать общий код ниже.
 function deepInfraImageSize(env) {
   const n = Number(env?.DEEPINFRA_IMAGE_SIZE);
   if (Number.isFinite(n) && n > 0) return Math.max(256, Math.min(1024, Math.floor(n)));
-  return 768;
+  return 1024; // цена фиксированная — берём полное качество
 }
 
 export function getDeepInfraProviders(env) {
@@ -212,21 +210,19 @@ export function getDeepInfraProviders(env) {
   const size = deepInfraImageSize(env);
   return [{
     id: DEEPINFRA_PROVIDER_ID,
-    title: "FLUX.2 Klein 4B (DeepInfra, платная — приоритет утром)",
+    title: "P-Image (DeepInfra PrunaAI, $0.005 — приоритет утром)",
     custom: true,
     paid: true,
     format: "json",
     keyEnv: "DEEPINFRA_API_KEY",
-    model: "black-forest-labs/FLUX-2-klein-4b",
-    timeoutMs: 60000,
-    url: "https://api.deepinfra.com/v1/inference/black-forest-labs/FLUX-2-klein-4b",
-    build: (prompt, seed) => ({
+    model: "PrunaAI/p-image",
+    timeoutMs: 30000,
+    url: "https://api.deepinfra.com/v1/openai/images/generations",
+    build: (prompt) => ({
+      model: "PrunaAI/p-image",
       prompt,
-      width: size,
-      height: size,
-      seed,
-      safety_tolerance: 2,
-      output_format: "png",
+      size: `${size}x${size}`,
+      n: 1,
     }),
   }];
 }
@@ -1355,11 +1351,14 @@ export async function generateImage(prompt, env, options = {}) {
     deadlineMs = 150000,
     attemptTimeoutMs = 0,
     usage = "",
+    paidUnlimited = false,
   } = options;
 
   // Платные провайдеры в тестовом контексте (команда /test и диагностика
   // /nim_health) ограничены дневным лимитом. Утренняя рассылка передаёт
   // usage="morning" и идёт по платному приоритету без этого лимита.
+  // Владелец бота (ADMIN_IDS) тестирует без лимита: paidUnlimited=true
+  // пробрасывают /test (по userId из задания) и владельческий /nim_health.
   const paidTestContext = usage === "test" || noFallback;
 
   // Общий дедлайн на всю очередь провайдеров: раньше каждый провайдер мог
@@ -1484,7 +1483,10 @@ export async function generateImage(prompt, env, options = {}) {
     // просто вернётся эта попытка с ошибкой лимита).
     let paidQuota = null;
     if (provider.paid && paidTestContext) {
-      paidQuota = await reservePaidTestCall(env, provider);
+      // Владелец бота лимитом не режется и счётчик не расходует.
+      paidQuota = paidUnlimited
+        ? { ok: true, unlimited: true, limit: paidTestDailyLimit(env) }
+        : await reservePaidTestCall(env, provider);
       if (!paidQuota.ok) {
         attempts.push({
           provider: provider.id,
@@ -1539,7 +1541,11 @@ export async function generateImage(prompt, env, options = {}) {
       status: result.status,
       latency: result.latency,
       error: result.error,
-      ...(paidQuota ? { paidTestCount: paidQuota.count, paidTestLimit: paidQuota.limit } : {}),
+      ...(paidQuota
+        ? (paidQuota.unlimited
+          ? { paidUnlimited: true, paidTestLimit: paidQuota.limit }
+          : { paidTestCount: paidQuota.count, paidTestLimit: paidQuota.limit })
+        : {}),
     });
 
     // Если Gemini вернул 404 с подсказкой «use models/...», добавляем
