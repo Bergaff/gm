@@ -60,7 +60,9 @@ function markKeyFailed(idx, env, status) {
  */
 export const NIM_PROVIDERS = [
   {
-    timeoutMs: 10000, // эндпоинт у пользователя висит дольше — не ждём 20 сек
+    // Эндпоинт живой, но отвечает дольше 10-15 сек (таймауты в /nim_health):
+    // даём глубокий запас по времени, сама модель в хвосте очереди.
+    timeoutMs: 45000,
     id: "flux-schnell",
     title: "FLUX.1 schnell",
     url: `${BASE}/black-forest-labs/flux.1-schnell`,
@@ -72,6 +74,8 @@ export const NIM_PROVIDERS = [
     }),
   },
   {
+    // Отключена: стабильные таймауты даже на 20 шагах, CF-пул покрывает.
+    disabled: true,
     timeoutMs: 15000,
     id: "flux-dev",
     title: "FLUX.1 dev",
@@ -665,22 +669,26 @@ async function cfMultipartInput(provider, prompt, seed, negative) {
 }
 
 // Hugging Face Inference: бесплатный аккаунт, токен HF_API_KEY.
-// FLUX.1-schnell/dev через официальный роутер; ответ — сами байты картинки.
+// FLUX.1 через hf-inference закрыт («deprecated by provider hf-inference»
+// в /nim_health), поэтому здесь Stable Diffusion 3.5 Large: модель живая,
+// но гейтед — владелец токена должен один раз принять лицензию Stability
+// на странице модели, иначе будет 403. Генерирует медленно (минута+),
+// поэтому свой длинный timeoutMs и место в хвосте очереди.
 export function getHfProviders(env) {
   if (!env?.HF_API_KEY) return [];
-  const make = (id, title, model) => ({
-    id,
-    title,
+  return [{
+    id: "hf-sd35-large",
+    title: "SD 3.5 Large (HuggingFace, бесплатно)",
     custom: true,
     format: "raw",
     keyEnv: "HF_API_KEY",
-    url: `https://router.huggingface.co/hf-inference/models/${model}`,
-    build: (prompt) => ({ inputs: prompt }),
-  });
-  return [
-    make("hf-flux-schnell", "FLUX.1 schnell (HuggingFace, бесплатно)", "black-forest-labs/FLUX.1-schnell"),
-    make("hf-flux-dev", "FLUX.1 dev (HuggingFace, бесплатно)", "black-forest-labs/FLUX.1-dev"),
-  ];
+    timeoutMs: 100000,
+    url: "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3.5-large",
+    build: (prompt) => ({
+      inputs: prompt,
+      parameters: { width: 1024, height: 1024, num_inference_steps: 28, guidance_scale: 4.5 },
+    }),
+  }];
 }
 
 
@@ -886,10 +894,11 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
       signal: AbortSignal.timeout(fetchTimeout),
     }).catch((e) => ({ ok: false, status: 0, pollinationsError: e }));
     let response = await doFetch();
-    // Бесплатный best-effort сервис регулярно отвечает 503 под нагрузкой —
-    // один повтор через пару секунд часто спасает.
-    if (!response.ok && [0, 429, 503].includes(response.status || 0)) {
-      await sleepMs(3000);
+    // Бесплатный best-effort сервис регулярно отвечает 503 под нагрузкой,
+    // а 402 FREE_LIMIT — это «1 картинка в 45 сек с IP»: один повтор
+    // через паузу часто спасает (в утренней отправке запрос обычно один).
+    if (!response.ok && [0, 402, 429, 503].includes(response.status || 0)) {
+      await sleepMs(response.status === 402 ? 8000 : 3000);
       response = await doFetch();
     }
     const latency = Date.now() - started;
@@ -1094,8 +1103,7 @@ function baseAutoPriority(provider) {
   if (id === "cf-phoenix") return 88;
   if (id === "pollinations") return 82;
   if (id === "cf-lucid") return 78; // качество топ, но дорого по нейронам
-  if (id === "hf-flux-schnell") return 72;
-  if (id === "hf-flux-dev") return 66;
+  if (id === "hf-sd35-large") return 62; // медленно, но качественно: глубокий запас
   if (provider.custom) return 60;
   // NVIDIA genai-эндпоинты у пользователя стабильно висят до таймаута —
   // в самый хвост очереди и с коротким личным таймаутом (timeoutMs ниже).
@@ -1137,6 +1145,15 @@ function rankAutoProviders(providers, stats = {}) {
   const good = scored.filter((x) => !x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
   const bad = scored.filter((x) => x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
   return good.length ? [...good, ...bad] : bad;
+}
+
+// Эффективный таймаут попытки: у провайдера может быть свой (timeoutMs) —
+// короткий для висящих эндпоинтов NVIDIA и длинный для медленного SD 3.5.
+// Общий дедлайн очереди (remaining) при этом всё равно главный ограничитель.
+function attemptTimeoutFor(provider, attemptTimeoutMs, remaining) {
+  const base = attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS;
+  const own = Number(provider?.timeoutMs) > 0 ? Number(provider.timeoutMs) : base;
+  return Math.max(1000, Math.min(own, remaining));
 }
 
 async function isCoolingDown(id, env) {
@@ -1285,7 +1302,7 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, provider.timeoutMs || TIMEOUT_MS, remainingMs())));
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, attemptTimeoutFor(provider, attemptTimeoutMs, remainingMs()));
 
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
@@ -1294,7 +1311,7 @@ export async function generateImage(prompt, env, options = {}) {
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
           keyIndex = nextIndex;
-          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, provider.timeoutMs || TIMEOUT_MS, remainingMs())));
+          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, attemptTimeoutFor(provider, attemptTimeoutMs, remainingMs()));
         }
       }
     } catch (error) {
