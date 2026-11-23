@@ -188,16 +188,79 @@ function fillTemplate(node, prompt, seed) {
   return node;
 }
 
+export const DEEPINFRA_PROVIDER_ID = "deepinfra-flux2-klein";
+export const PAID_TEST_DAILY_LIMIT = 5;
+
+// DeepInfra — купленная платная генерация FLUX.2 Klein 4B.
+// По утрам (usage="morning") идёт первой в auto-очереди; в тестах
+// (usage="test" и /nim_health) действует жёсткий лимит платных вызовов.
+// SDK не тянем: Worker ходит в тот же REST endpoint обычным fetch.
+export function getDeepInfraProviders(env) {
+  if (!env?.DEEPINFRA_API_KEY) return [];
+  return [{
+    id: DEEPINFRA_PROVIDER_ID,
+    title: "FLUX.2 Klein 4B (DeepInfra, платная — приоритет утром)",
+    custom: true,
+    paid: true,
+    format: "json",
+    keyEnv: "DEEPINFRA_API_KEY",
+    model: "black-forest-labs/FLUX-2-klein-4b",
+    timeoutMs: 60000,
+    url: "https://api.deepinfra.com/v1/inference/black-forest-labs/FLUX-2-klein-4b",
+    build: (prompt, seed) => ({
+      prompt,
+      width: 1024,
+      height: 1024,
+      seed,
+      safety_tolerance: 2,
+      output_format: "png",
+    }),
+  }];
+}
+
+function paidTestDayKey(providerId) {
+  return `paidtest:${providerId}:${new Date().toISOString().slice(0, 10)}`;
+}
+
+export function paidTestDailyLimit(env) {
+  const n = Number(env?.PAID_TEST_DAILY_LIMIT);
+  if (Number.isFinite(n)) return Math.max(0, Math.min(PAID_TEST_DAILY_LIMIT, Math.floor(n)));
+  return PAID_TEST_DAILY_LIMIT;
+}
+
+export async function getPaidTestUsage(env, providerId = DEEPINFRA_PROVIDER_ID) {
+  if (!env?.BOT_KV) return 0;
+  return Number(await env.BOT_KV.get(paidTestDayKey(providerId))) || 0;
+}
+
+// Резерв платного ТЕСТОВОГО вызова до обращения к API: иначе параллельные
+// /test в разных чатах могли бы пробить дневной лимит. Утренние отправки
+// сюда не попадают и лимитом не режутся.
+async function reservePaidTestCall(env, provider) {
+  const limit = paidTestDailyLimit(env);
+  if (!limit) return { ok: false, count: 0, limit };
+  if (!env?.BOT_KV) return { ok: true, count: 0, limit };
+
+  const key = paidTestDayKey(provider.id);
+  const count = Number(await env.BOT_KV.get(key)) || 0;
+  if (count >= limit) return { ok: false, count, limit };
+  const next = count + 1;
+  await env.BOT_KV.put(key, String(next), { expirationTtl: 2 * 86400 });
+  return { ok: true, count: next, limit };
+}
+
 // Встроенные Cloudflare/NVIDIA/OpenRouter + добавленные пользователем
 export function getAllProviders(env) {
-  // Порядок = приоритет: Cloudflare (бесплатно), затем NVIDIA,
-  // затем OpenRouter и пользовательские API. Gemini для картинок скрыт:
-  // по просьбе пользователя Gemini оставляем только для текста.
+  // Порядок в списке = порядок в /models. Реальная auto-очередь строится
+  // rankAutoProviders(): платный DeepInfra утром идёт первым, дальше —
+  // бесплатный Cloudflare-пул и независимые запасы. Gemini для картинок
+  // скрыт: по просьбе пользователя Gemini оставляем только для текста.
   // disabled — модели, отключённые по качеству. Секрет SHOW_ALL_MODELS=1
   // возвращает их обратно, если понадобится сравнить.
   const showAll = env && String(env.SHOW_ALL_MODELS || "") === "1";
 
   return [
+    ...getDeepInfraProviders(env),
     ...getCfProviders(env),
     ...NIM_PROVIDERS,
     ...getHfProviders(env),
@@ -747,6 +810,7 @@ function extractBase64(payload) {
 
   const clean = (value) => {
     if (typeof value !== "string" || value.length < 100) return null;
+    if (value.startsWith("http://") || value.startsWith("https://")) return null;
     return value.startsWith("data:") && value.includes(",")
       ? value.slice(value.indexOf(",") + 1)
       : value;
@@ -1200,6 +1264,7 @@ async function getAutoStats(env, chatId, days = 14) {
 }
 
 function baseAutoPriority(provider) {
+  if (provider.paid) return 200; // купленный DeepInfra — приоритет по утрам
   const id = provider.id;
   // Быстрые и надёжные — первыми: CF FLUX schnell отвечает за секунды и
   // бесплатен. NVIDIA flux-dev (28 шагов) регулярно упирается в таймаут
@@ -1250,9 +1315,16 @@ function rankAutoProviders(providers, stats = {}) {
     return { p, i, bad, score: baseAutoPriority(p) + quality + reliability + explored };
   });
 
-  const good = scored.filter((x) => !x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
-  const bad = scored.filter((x) => x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
-  return good.length ? [...good, ...bad] : bad;
+  // Платные провайдеры всегда возглавляют auto-очередь: пользователь
+  // купил DeepInfra именно ради утреннего приоритета. Статистика лайков
+  // не должна задвигать его за бесплатные модели; cooldown и тестовый
+  // лимит при этом продолжают действовать как обычно.
+  const paid = scored.filter((x) => x.p.paid)
+    .sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
+  const rest = scored.filter((x) => !x.p.paid);
+  const good = rest.filter((x) => !x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
+  const bad = rest.filter((x) => x.bad).sort((a, b) => b.score - a.score || a.i - b.i).map((x) => x.p);
+  return [...paid, ...(good.length ? [...good, ...bad] : bad)];
 }
 
 // Эффективный таймаут попытки: у провайдера может быть свой (timeoutMs) —
@@ -1290,7 +1362,13 @@ export async function generateImage(prompt, env, options = {}) {
     negative = "",
     deadlineMs = 150000,
     attemptTimeoutMs = 0,
+    usage = "",
   } = options;
+
+  // Платные провайдеры в тестовом контексте (команда /test и диагностика
+  // /nim_health) ограничены дневным лимитом. Утренняя рассылка передаёт
+  // usage="morning" и идёт по платному приоритету без этого лимита.
+  const paidTestContext = usage === "test" || noFallback;
 
   // Общий дедлайн на всю очередь провайдеров: раньше каждый провайдер мог
   // висеть по 20 секунд, очередь из 6-7 моделей плюс перебор ключей давал
@@ -1310,6 +1388,7 @@ export async function generateImage(prompt, env, options = {}) {
 
   const keys = getApiKeys(env);
   const hasCustom = getCustomProviders(env).length > 0 ||
+    getDeepInfraProviders(env).length > 0 || getHfProviders(env).length > 0 ||
     getCfProviders(env).length > 0 || getOpenRouterProviders(env).length > 0 ||
     pollinationsEnabled(env) || hordeEnabled(env);
 
@@ -1407,6 +1486,27 @@ export async function generateImage(prompt, env, options = {}) {
       continue;
     }
 
+    // Платный провайдер в тесте: сначала резервируем дневную квоту.
+    // Если лимит исчерпан, НЕ обращаемся к платному API вообще, а честно
+    // идём по бесплатным запасным (в /nim_health очередь строгая — там
+    // просто вернётся эта попытка с ошибкой лимита).
+    let paidQuota = null;
+    if (provider.paid && paidTestContext) {
+      paidQuota = await reservePaidTestCall(env, provider);
+      if (!paidQuota.ok) {
+        attempts.push({
+          provider: provider.id,
+          ok: false,
+          status: 429,
+          latency: 0,
+          paidTestCount: paidQuota.count,
+          paidTestLimit: paidQuota.limit,
+          error: `Платные тесты: дневной лимит ${paidQuota.limit}/день исчерпан`,
+        });
+        continue;
+      }
+    }
+
     let result;
 
     try {
@@ -1447,6 +1547,7 @@ export async function generateImage(prompt, env, options = {}) {
       status: result.status,
       latency: result.latency,
       error: result.error,
+      ...(paidQuota ? { paidTestCount: paidQuota.count, paidTestLimit: paidQuota.limit } : {}),
     });
 
     // Если Gemini вернул 404 с подсказкой «use models/...», добавляем

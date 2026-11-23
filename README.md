@@ -4,7 +4,7 @@ Telegram-бот, который каждое утро присылает «До�
 
 ## Возможности
 
-- Картинки из публичной папки **Google Drive**, генерация через современные провайдеры (Cloudflare Workers AI: FLUX.1 schnell, FLUX.2 Klein, Leonardo Lucid/Phoenix, SDXL; NVIDIA NIM FLUX; Pollinations без ключа) или поиск картинок через **Google/Yandex Images** с safe-фильтром. Мёртвый NVIDIA SD3 Medium отключён (эндпоинт закрыт NVIDIA); состав пула проверяется владельческой командой `/nim_health`
+- Картинки из публичной папки **Google Drive**, генерация через современные провайдеры (платный DeepInfra FLUX.2 Klein 4B с приоритетом по утрам — при заданном `DEEPINFRA_API_KEY`; бесплатные Cloudflare Workers AI: FLUX.1 schnell, FLUX.2 Klein, Leonardo Phoenix; Pollinations без ключа) или поиск картинок через **Google/Yandex Images** с safe-фильтром. Состав пула проверяется владельческой командой `/nim_health`
 - Разное время и разные тексты для **будней, выходных, выбранных праздников и дней рождения**; у праздников чата можно выбрать режим «будний» или «выходной»
 - Отдельные настройки **для каждого чата**, включая характер и короткие характеристики AI-подписей
 - Время можно задать **диапазоном** (`09:00-09:40`) — бот выберет случайную минуту
@@ -32,6 +32,7 @@ Push в `main` → Cloudflare Workers Builds → `npx wrangler deploy`.
 - `BOT_TOKEN`
 - `GOOGLE_API_KEY`
 - `NVIDIA_API_KEY`
+- `DEEPINFRA_API_KEY` — опционально, платная генерация FLUX.2 Klein 4B на DeepInfra. По утрам провайдер `deepinfra-flux2-klein` идёт первым в auto-очереди (или выбирается вручную в `/models`); платные вызовы из `/test` и `/nim_health` ограничены — не более 5 в день на весь бот (`PAID_TEST_DAILY_LIMIT` можно только уменьшить, максимум 5), дальше тесты идут по бесплатным моделям
 - `GEMINI_API_KEY` — опционально, Gemini только для более живых текстов; в генерации картинок Gemini не показывается и не используется
 - `GEMINI_TEXT_MODEL` — опционально, первая Gemini-модель для текста; по умолчанию `gemini-3.5-flash`
 - `GEMINI_TEXT_MODELS` — опционально, список Gemini-моделей для текста через запятую/пробел; бот пробует их по очереди, затем встроенный список `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`

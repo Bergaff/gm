@@ -259,6 +259,7 @@ async function health(chatId, env) {
         const result = await generateImage(prompt, env, {
           preferred: provider.id,
           noFallback: true,
+          usage: "test",
         });
         const ok = result.ok && result.provider === provider.id;
         const attempt = result.attempts?.find((a) => a.provider === provider.id);

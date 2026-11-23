@@ -355,6 +355,8 @@ function attemptTag(a) {
 export function morningTestReport(result) {
   const captionPublicError = publicGenerationError(result.captionError);
   const imagePublicError = publicGenerationError(result.error);
+  const paidAttempt = [...(result.attempts || [])].reverse()
+    .find((a) => a.paidTestLimit !== undefined);
   const requestedModel = result.modelRequested;
   const requestedFailed = requestedModel && requestedModel !== "auto" &&
     (result.modelAttemptFailed ??
@@ -398,6 +400,9 @@ export function morningTestReport(result) {
     // без сырых тел ошибок. «—» без причины не помогала понять, кто мёртв.
     result.attempts?.length
       ? `Попытки: <code>${result.attempts.slice(0, 8).map((a) => `${escapeHtml(a.provider)}: ${attemptTag(a)}`).join(" · ")}</code>`
+      : null,
+    paidAttempt
+      ? `Платные тесты (${escapeHtml(paidAttempt.provider)}): <b>${paidAttempt.paidTestCount}/${paidAttempt.paidTestLimit}</b> за сегодня`
       : null,
     result.error ? `\n⚠️ Картинка: ${escapeHtml(imagePublicError)}` : null,
   ].filter(Boolean).join("\n");
@@ -606,6 +611,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
         // Тест не должен висеть минутами: жёсткий общий лимит на очередь.
         deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
+        usage: test ? "test" : "morning",
       });
       attempts = result.attempts || [];
       if (result.ok) image = result;
@@ -651,6 +657,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       negative: fallbackNegative,
       deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
+        usage: test ? "test" : "morning",
     });
     attempts = attempts.concat(result.attempts || []);
     if (result.ok) {
@@ -714,6 +721,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
           negative: fallbackNegative,
           deadlineMs: test ? 75000 : 240000,
         attemptTimeoutMs: test ? 12000 : 20000,
+        usage: test ? "test" : "morning",
         });
         attempts = attempts.concat(result.attempts || []);
         if (result.ok) {
@@ -1113,6 +1121,7 @@ export function modelsText(providers, current, stats, keyCount) {
     const st = stats[p.id];
     const mark = p.id === current ? "✅ " : "";
     lines.push(`${mark}<b>Модель ${i + 1}</b> — ${escapeHtml(p.title)}`);
+    if (p.paid) lines.push("   <i>💳 платная: по утрам приоритет; платные тесты — не более 5 в день</i>");
     if (st) {
       const total = st.likes + st.dislikes;
       const rate = total ? Math.round((st.likes / total) * 100) + "%" : "—";
