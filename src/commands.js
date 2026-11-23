@@ -355,6 +355,13 @@ function attemptTag(a) {
 export function morningTestReport(result) {
   const captionPublicError = publicGenerationError(result.captionError);
   const imagePublicError = publicGenerationError(result.error);
+  const requestedModel = result.modelRequested;
+  const requestedFailed = requestedModel && requestedModel !== "auto" &&
+    (result.modelAttemptFailed ??
+      result.attempts?.some((a) => a.provider === requestedModel && !a.ok));
+  const generationNotCalled = requestedModel && requestedModel !== "auto" &&
+    result.provider && result.provider !== requestedModel &&
+    result.generationAttempted === false && !requestedFailed;
   const report = [
     `Статус: <code>${result.status}</code>`,
     result.provider ? `Источник картинки: <b>${result.provider}</b>` : null,
@@ -377,9 +384,14 @@ export function morningTestReport(result) {
       ? `⚠️ AI-подпись: ${escapeHtml(captionPublicError)}`
       : null,
     // Выбранная вручную модель не ответила, но сработала запасная:
-    // показываем честно, без сырых ошибок API.
-    result.provider && result.modelRequested && result.modelRequested !== "auto" && result.provider !== result.modelRequested
-      ? `ℹ️ Выбранная модель (<b>${escapeHtml(result.modelRequested)}</b>) не ответила — картинка сделана запасной: <b>${escapeHtml(result.provider)}</b>`
+    // показываем только если модель РЕАЛЬНО вызывалась и упала. Раньше
+    // строка появлялась и когда источник чата — Google Drive/поиск:
+    // генерация не запускалась вовсе, а отчёт врал «модель не ответила».
+    result.provider && requestedFailed && result.provider !== requestedModel
+      ? `ℹ️ Выбранная модель (<b>${escapeHtml(requestedModel)}</b>) не ответила — картинка сделана запасной: <b>${escapeHtml(result.provider)}</b>`
+      : null,
+    generationNotCalled
+      ? `ℹ️ Модель (<b>${escapeHtml(requestedModel)}</b>) не вызывалась: источник чата дал картинку без генерации (<b>${escapeHtml(result.provider)}</b>)`
       : null,
     // Компактная сводка попыток для диагностики: провайдер и статус,
     // а при статусе 0 — короткая причина (таймаут/лимит/пусто/сеть),
@@ -811,6 +823,10 @@ export async function sendMorning(chatId, settings, env, options = {}) {
     status,
     provider: image?.provider,
     modelRequested: settings.nimModel || "auto",
+    generationAttempted: attempts.some((a) => a.provider && a.provider !== "prompt"),
+    modelAttemptFailed: settings.nimModel && settings.nimModel !== "auto"
+      ? attempts.some((a) => a.provider === settings.nimModel && !a.ok)
+      : false,
     error,
     prompt: useNim ? activePrompt : useSearch ? (image?.query || searchQuery || rawPrompt) : null,
     promptOriginal: useNim && promptTranslated ? rawPrompt : null,

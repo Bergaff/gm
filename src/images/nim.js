@@ -208,10 +208,11 @@ export function getAllProviders(env) {
   ].filter((p) => showAll || !p.disabled);
 }
 
-// AI Horde: бесплатная очередь сообщества на чужих GPU. Ключ не нужен
-// (анонимный режим), но медленно: от десятков секунд до минут, поэтому
-// это глубокий запас, а не основа. Свой бесплатный ключ stablehorde.net
-// (секрет AIHORDE_API_KEY) заметно ускоряет очередь.
+// AI Horde: бесплатная очередь сообщества на чужих GPU. Медленно:
+// от десятков секунд до минут, поэтому это глубокий запас, а не основа.
+// Нужен свой бесплатный ключ stablehorde.net (секрет AIHORDE_API_KEY):
+// анонимный режим Horde режет с общих IP Cloudflare Workers
+// («IP address has been put into timeout» в /nim_health).
 export function hordeProvider() {
   return {
     id: "ai-horde",
@@ -238,7 +239,9 @@ export function hordeProvider() {
 }
 
 function hordeEnabled(env) {
-  return String(env?.DISABLE_HORDE || "") !== "1";
+  // Только с личным ключом: анонимные запросы с egress-IP Cloudflare
+  // Horde почти сразу ставит в timeout за «abuse prevention».
+  return Boolean(env?.AIHORDE_API_KEY) && String(env?.DISABLE_HORDE || "") !== "1";
 }
 
 // Pollinations (Classic API): бесплатная генерация картинок вообще без ключа
