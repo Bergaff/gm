@@ -337,6 +337,19 @@ function publicGenerationError(error) {
   return "провайдер временно не ответил, бот попробует запасной вариант";
 }
 
+// Короткий ярлык попытки для отчёта: OK, HTTP-статус или причина при 0.
+function attemptTag(a) {
+  if (a.ok) return "OK";
+  if (a.status) return String(a.status);
+  const e = String(a.error || "").toLowerCase();
+  if (/abort|timeout|timed out|превышен|deadline/.test(e)) return "таймаут";
+  if (/limit|quota|exceed|neuron/.test(e)) return "лимит";
+  if (/нет изображения|no image|пуст|empty/.test(e)) return "пусто";
+  if (/брак/.test(e)) return "брак";
+  if (/fetch|network|econn|enotfound|socket|dns/.test(e)) return "сеть";
+  return "ошибка";
+}
+
 export function morningTestReport(result) {
   const captionPublicError = publicGenerationError(result.captionError);
   const imagePublicError = publicGenerationError(result.error);
@@ -366,10 +379,11 @@ export function morningTestReport(result) {
     result.provider && result.modelRequested && result.modelRequested !== "auto" && result.provider !== result.modelRequested
       ? `ℹ️ Выбранная модель (<b>${escapeHtml(result.modelRequested)}</b>) не ответила — картинка сделана запасной: <b>${escapeHtml(result.provider)}</b>`
       : null,
-    // Компактная сводка попыток для диагностики: провайдер и HTTP-статус,
-    // без тел ошибок. Видно, кто именно падает, прямо из /test.
+    // Компактная сводка попыток для диагностики: провайдер и статус,
+    // а при статусе 0 — короткая причина (таймаут/лимит/пусто/сеть),
+    // без сырых тел ошибок. «—» без причины не помогала понять, кто мёртв.
     result.attempts?.length
-      ? `Попытки: <code>${result.attempts.slice(0, 8).map((a) => `${escapeHtml(a.provider)}: ${a.ok ? "OK" : a.status || "—"}`).join(" · ")}</code>`
+      ? `Попытки: <code>${result.attempts.slice(0, 8).map((a) => `${escapeHtml(a.provider)}: ${attemptTag(a)}`).join(" · ")}</code>`
       : null,
     result.error ? `\n⚠️ Картинка: ${escapeHtml(imagePublicError)}` : null,
   ].filter(Boolean).join("\n");
@@ -573,6 +587,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
         negative,
         // Тест не должен висеть минутами: жёсткий общий лимит на очередь.
         deadlineMs: test ? 75000 : 240000,
+        attemptTimeoutMs: test ? 12000 : 20000,
       });
       attempts = result.attempts || [];
       if (result.ok) image = result;
@@ -617,6 +632,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       chatId,
       negative: fallbackNegative,
       deadlineMs: test ? 75000 : 240000,
+        attemptTimeoutMs: test ? 12000 : 20000,
     });
     attempts = attempts.concat(result.attempts || []);
     if (result.ok) {
@@ -679,6 +695,7 @@ export async function sendMorning(chatId, settings, env, options = {}) {
           chatId,
           negative: fallbackNegative,
           deadlineMs: test ? 75000 : 240000,
+        attemptTimeoutMs: test ? 12000 : 20000,
         });
         attempts = attempts.concat(result.attempts || []);
         if (result.ok) {
@@ -736,8 +753,10 @@ export async function sendMorning(chatId, settings, env, options = {}) {
       hint = "\n<i>Поиск не сработал. Так как он неофициальный, настройте запасной источник: /set_gdrive или /set_source nim</i>";
     } else if (!settings.gdriveFolder && settings.source === "gdrive") {
       hint = "\n<i>Источник не настроен: /set_source nim или /set_gdrive</i>";
-    } else if (attempts.some((a) => a.status === 429 ||
-               /limit|quota|exceed/i.test(String(a.error || "")))) {
+    } else if (attempts.some((a) => String(a.provider || "").startsWith("cf-") &&
+               (a.status === 429 || /limit|quota|exceed|neuron/i.test(String(a.error || ""))))) {
+      // Подсказку про нейроны показываем только по ошибке САМИХ cf-моделей:
+      // раньше она ложно срабатывала по слову limit в чужом ответе (503).
       hint = "\n<i>Похоже, кончился дневной лимит Workers AI — /usage</i>";
     } else if (attempts.length) {
       const first = attempts.find((a) => !a.ok);

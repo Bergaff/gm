@@ -8,6 +8,7 @@ const BASE = "https://ai.api.nvidia.com/v1/genai";
 // Крон (scheduled) имеет лимит 15 минут, поэтому по расписанию картинки приходили.
 const TIMEOUT_MS = 20000;
 const FAIL_COOLDOWN = 30 * 60;
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Пул ключей NVIDIA. Поддерживаются:
@@ -771,9 +772,16 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
 
   // Pollinations Classic API — простой GET, тело ответа = сама картинка.
   if (provider.pollinations) {
-    const response = await fetch(provider.build(prompt, seed), {
+    const doFetch = () => fetch(provider.build(prompt, seed), {
       signal: AbortSignal.timeout(fetchTimeout),
     }).catch((e) => ({ ok: false, status: 0, pollinationsError: e }));
+    let response = await doFetch();
+    // Бесплатный best-effort сервис регулярно отвечает 503 под нагрузкой —
+    // один повтор через пару секунд часто спасает.
+    if (!response.ok && [0, 429, 503].includes(response.status || 0)) {
+      await sleepMs(3000);
+      response = await doFetch();
+    }
     const latency = Date.now() - started;
     if (!response.ok) {
       const body = response.pollinationsError
@@ -791,10 +799,25 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
   // Cloudflare Workers AI — через binding, без ключа и без fetch.
   if (provider.binding) {
     try {
-      const out = await env.AI.run(
-        provider.model,
-        provider.build(prompt, seed, negative)
-      );
+      // Один повтор при временном сбое: AI.run иногда бросает разовую
+      // ошибку сети/перегрузки, и модель хоронили зря. Квоту не повторяем.
+      let out = null;
+      let lastError = null;
+      for (let i = 0; i < 2; i++) {
+        try {
+          out = await env.AI.run(
+            provider.model,
+            provider.build(prompt, seed, negative)
+          );
+          lastError = null;
+          break;
+        } catch (e) {
+          lastError = e;
+          if (/limit|quota|exceed|neuron/i.test(String(e?.message || e)) || i === 1) break;
+          await sleepMs(1500);
+        }
+      }
+      if (lastError) throw lastError;
       const b64 = out?.image || (typeof out === "string" ? out : null);
 
       if (b64) {
@@ -1023,6 +1046,7 @@ export async function generateImage(prompt, env, options = {}) {
     noFallback = false,
     negative = "",
     deadlineMs = 150000,
+    attemptTimeoutMs = 0,
   } = options;
 
   // Общий дедлайн на всю очередь провайдеров: раньше каждый провайдер мог
@@ -1143,7 +1167,7 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(TIMEOUT_MS, remainingMs())));
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, remainingMs())));
 
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
@@ -1152,7 +1176,7 @@ export async function generateImage(prompt, env, options = {}) {
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
           keyIndex = nextIndex;
-          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(TIMEOUT_MS, remainingMs())));
+          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, remainingMs())));
         }
       }
     } catch (error) {
