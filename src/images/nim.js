@@ -195,8 +195,21 @@ export const PAID_TEST_DAILY_LIMIT = 5;
 // По утрам (usage="morning") идёт первой в auto-очереди; в тестах
 // (usage="test" и /nim_health) действует жёсткий лимит платных вызовов.
 // SDK не тянем: Worker ходит в тот же REST endpoint обычным fetch.
+//
+// Размер по умолчанию 768x768, а не 1024x1024: DeepInfra берёт
+// $0.014 * (width/1024) * (height/1024), поэтому 768x768 стоит ~$0.0079
+// вместо $0.014 (-44%). Для Telegram этого достаточно: sendPhoto всё
+// равно пережимает картинку под показ в чате, исходные 1024 там не видны.
+// Вернуть максимум: DEEPINFRA_IMAGE_SIZE=1024; ещё дешевле: 512 (~$0.0035).
+function deepInfraImageSize(env) {
+  const n = Number(env?.DEEPINFRA_IMAGE_SIZE);
+  if (Number.isFinite(n) && n > 0) return Math.max(256, Math.min(1024, Math.floor(n)));
+  return 768;
+}
+
 export function getDeepInfraProviders(env) {
   if (!env?.DEEPINFRA_API_KEY) return [];
+  const size = deepInfraImageSize(env);
   return [{
     id: DEEPINFRA_PROVIDER_ID,
     title: "FLUX.2 Klein 4B (DeepInfra, платная — приоритет утром)",
@@ -209,8 +222,8 @@ export function getDeepInfraProviders(env) {
     url: "https://api.deepinfra.com/v1/inference/black-forest-labs/FLUX-2-klein-4b",
     build: (prompt, seed) => ({
       prompt,
-      width: 1024,
-      height: 1024,
+      width: size,
+      height: size,
       seed,
       safety_tolerance: 2,
       output_format: "png",
