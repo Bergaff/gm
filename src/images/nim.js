@@ -78,6 +78,9 @@ export const NIM_PROVIDERS = [
     }),
   },
   {
+    // Отключена: NVIDIA официально закрыла бесплатный эндпоинт SD3 Medium
+    // (deprecated на build.nvidia.com), в проде стабильный 404.
+    disabled: true,
     id: "sd3-medium",
     title: "Stable Diffusion 3 Medium",
     url: `${BASE}/stabilityai/stable-diffusion-3-medium`,
@@ -245,6 +248,62 @@ export const CF_PROVIDERS = [
       num_steps: 8,
       width: 1024,
       height: 1024,
+      seed,
+    }),
+  },
+  {
+    // FLUX второго поколения: быстрый и дешёвый по нейронам, качество
+    // заметно выше моделей SD-поколения.
+    id: "cf-flux2-klein",
+    title: "FLUX.2 Klein 4B (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/black-forest-labs/flux-2-klein-4b",
+    build: (prompt, seed) => ({ prompt, seed, steps: 4, width: 1024, height: 1024 }),
+  },
+  {
+    // Leonardo Lucid Origin — самая «красивая» из бесплатных CF-моделей,
+    // но дорогая по нейронам: не на каждый день, а когда хочется качества.
+    id: "cf-lucid",
+    title: "Lucid Origin (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/leonardo/lucid-origin",
+    build: (prompt, seed, negative) => ({
+      prompt,
+      negative_prompt: negative || undefined,
+      width: 1024,
+      height: 1024,
+      num_steps: 24,
+      guidance: 4,
+      seed,
+    }),
+  },
+  {
+    id: "cf-phoenix",
+    title: "Phoenix 1.0 (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/leonardo/phoenix-1.0",
+    build: (prompt, seed, negative) => ({
+      prompt,
+      negative_prompt: negative || undefined,
+      width: 1024,
+      height: 1024,
+      num_steps: 24,
+      guidance: 4,
+      seed,
+    }),
+  },
+  {
+    id: "cf-sdxl-base",
+    title: "SDXL Base 1.0 (Cloudflare, бесплатно)",
+    binding: true,
+    model: "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+    build: (prompt, seed, negative) => ({
+      prompt,
+      negative_prompt: negative || undefined,
+      width: 1024,
+      height: 1024,
+      num_steps: 20,
+      guidance: 7.5,
       seed,
     }),
   },
@@ -972,18 +1031,21 @@ async function getAutoStats(env, chatId, days = 14) {
 
 function baseAutoPriority(provider) {
   const id = provider.id;
-  if (id === "pollinations") return 80;
   // Быстрые и надёжные — первыми: CF FLUX schnell отвечает за секунды и
   // бесплатен. NVIDIA flux-dev (28 шагов) регулярно упирается в таймаут
   // запроса и раньше съедал по 20 секунд в начале каждой очереди, из-за
   // чего тесты висели, а до рабочих моделей очередь не доходила.
   if (id === "cf-flux") return 95;
-  if (id === "flux-schnell") return 85;
-  if (id === "cf-dreamshaper") return 70;
+  if (id === "cf-flux2-klein") return 90;
+  if (id === "cf-lucid") return 85;
+  if (id === "flux-schnell") return 80;
+  if (id === "cf-phoenix") return 78;
+  if (id === "pollinations") return 75;
+  if (id === "cf-dreamshaper") return 65;
   if (provider.custom) return 60;
-  if (id === "flux-dev") return 55;
-  if (id === "sd3-medium") return 40;
-  return 50;
+  if (id === "cf-sdxl-base") return 55;
+  if (id === "flux-dev") return 50;
+  return 45;
 }
 
 function providerLooksBadForAuto(provider, stat = {}) {

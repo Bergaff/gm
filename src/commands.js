@@ -2,6 +2,8 @@ import {
   DEFAULT_SETTINGS,
   WEEKDAY_MESSAGES,
   WEEKEND_MESSAGES,
+  WEEKDAY_SECOND,
+  WEEKEND_SECOND,
   DAY_MESSAGES,
   HOLIDAY_MESSAGES,
 } from "./config.js";
@@ -425,18 +427,22 @@ export function voteKeyboard(postId, likes = 0, dislikes = 0) {
 // Шаблонная фраза с учётом дня недели.
 // У понедельника, пятницы и воскресенья своё настроение — раньше
 // в любой день шла одна и та же обезличенная фраза.
-function pickTemplate(now) {
+export function pickTemplate(now) {
   const holiday = now.holidayName ? HOLIDAY_MESSAGES[now.holidayName] : null;
   if (holiday && holiday.length) return pick(holiday);
 
   const special = DAY_MESSAGES[now.weekday];
 
   // В «особые» дни половину раз берём тематическую фразу
-  if (special && special.length && Math.random() < 0.5) {
-    return pick(special);
-  }
+  const base = special && special.length && Math.random() < 0.5
+    ? pick(special)
+    : pick(now.isWeekend ? WEEKEND_MESSAGES : WEEKDAY_MESSAGES);
 
-  return pick(now.isWeekend ? WEEKEND_MESSAGES : WEEKDAY_MESSAGES);
+  // Подпись из одного короткого предложения выглядит бедно, особенно
+  // в чатах без AI и характера. Добавляем второе живое предложение —
+  // чуть шире, но без перегруза.
+  const second = pick(now.isWeekend ? WEEKEND_SECOND : WEEKDAY_SECOND);
+  return `${base} ${second}`;
 }
 
 export async function sendMorning(chatId, settings, env, options = {}) {
