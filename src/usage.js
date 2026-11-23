@@ -47,6 +47,69 @@ export function estimateTextNeurons(inputChars, outputChars) {
   return (inTok / 1e6) * 25608 + (outTok / 1e6) * 75147;
 }
 
+function emptyUsage() {
+  return {
+    total: 0, image: 0, text: 0, calls: 0,
+    gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0,
+    // Фактические вызовы image-API по провайдерам за день:
+    // { "deepinfra-p-image": { calls, ok, fails }, "cf-flux": {...} }
+    api: {},
+    // Отдельная сводка по платной генерации: сколько ушло в утреннюю
+    // рассылку, сколько съели тесты по лимиту и тесты владельца.
+    paidImage: {
+      calls: 0, ok: 0, fails: 0,
+      production: 0, limitedTests: 0, ownerTests: 0,
+      costUsd: 0, testLimit: 3,
+    },
+  };
+}
+
+function normalizeUsage(data) {
+  const base = emptyUsage();
+  if (!data || typeof data !== "object") return base;
+  return {
+    ...base,
+    ...data,
+    api: data.api && typeof data.api === "object" ? data.api : {},
+    paidImage: { ...base.paidImage, ...(data.paidImage || {}) },
+  };
+}
+
+// Записать один фактический вызов image-API. Пишется из generateImage()
+// в момент реального обращения к провайдеру: пропуски по cooldown и
+// заблокированные лимитом тесты сюда не попадают — API там не дёргалось.
+// Никогда не бросает исключение: учёт не должен ломать генерацию.
+export async function addApiUsage(env, providerId, info = {}) {
+  if (!env?.BOT_KV || !providerId) return;
+  try {
+    const key = dayKey();
+    const cur = normalizeUsage(await env.BOT_KV.get(key, "json"));
+    const id = String(providerId);
+    const entry = cur.api[id] || { calls: 0, ok: 0, fails: 0 };
+    entry.calls += 1;
+    if (info.ok) entry.ok += 1; else entry.fails += 1;
+    cur.api[id] = entry;
+
+    if (info.paid) {
+      const p = cur.paidImage;
+      p.calls += 1;
+      if (info.ok) p.ok += 1; else p.fails += 1;
+      if (info.context === "morning") p.production += 1;
+      else if (info.unlimited) p.ownerTests += 1;
+      else if (info.context === "test" || info.testContext) p.limitedTests += 1;
+      // Платит провайдер за успешные картинки: оценку стоимости копим
+      // только по ok, а не по упавшим запросам.
+      const cost = Number(info.unitCostUsd);
+      if (info.ok && Number.isFinite(cost) && cost > 0) p.costUsd += cost;
+      if (Number(info.testLimit) > 0) p.testLimit = Math.floor(Number(info.testLimit));
+    }
+
+    await env.BOT_KV.put(key, JSON.stringify(cur), { expirationTtl: 8 * 86400 });
+  } catch {
+    // учёт не должен ломать генерацию
+  }
+}
+
 // Прибавить расход за сегодня. Никогда не бросает исключение.
 export async function addUsage(env, neurons, kind = "other") {
   // ВАЖНО: neurons может быть 0 — у Gemini и NVIDIA свои лимиты,
@@ -59,8 +122,7 @@ export async function addUsage(env, neurons, kind = "other") {
 
   try {
     const key = dayKey();
-    const cur = (await env.BOT_KV.get(key, "json")) ||
-      { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
+    const cur = normalizeUsage(await env.BOT_KV.get(key, "json"));
 
     cur.total += neurons;
     cur.calls += 1;
@@ -90,10 +152,9 @@ export async function addUsage(env, neurons, kind = "other") {
 
 export async function getUsage(env, offsetDays = 0) {
   try {
-    const data = await env.BOT_KV.get(dayKey(offsetDays), "json");
-    return data || { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
+    return normalizeUsage(await env.BOT_KV.get(dayKey(offsetDays), "json"));
   } catch {
-    return { total: 0, image: 0, text: 0, calls: 0, gemini: 0, geminiText: 0, geminiImage: 0, nvidia: 0, openrouterImage: 0 };
+    return emptyUsage();
   }
 }
 
@@ -160,20 +221,47 @@ export async function usageText(env, escapeHtml) {
     `🖼 картинки: ${Math.round(today.image)} нейронов`,
     `💬 текст: ${Math.round(today.text)} нейронов`,
     `📞 вызовов: ${today.calls}`,
+  ];
+
+  // Фактические вызовы image-API за сегодня: сколько раз бот реально
+  // дёргал каждый провайдер (утро + тесты + health), а не только посты.
+  const paid = today.paidImage || {};
+  const apiEntries = Object.entries(today.api || {})
+    .sort((a, b) => (b[1].calls || 0) - (a[1].calls || 0));
+  lines.push("", "<b>Вызовы API картинок сегодня</b>");
+  if (paid.calls || env.DEEPINFRA_API_KEY) {
+    lines.push(
+      `💳 DeepInfra P-Image: <b>${paid.calls || 0}</b> вызовов` +
+        ` (✅ ${paid.ok || 0} · ❌ ${paid.fails || 0}) · ≈ <b>$${(paid.costUsd || 0).toFixed(3)}</b>`,
+      `   🌅 утро: ${paid.production || 0} · 🧪 тесты по лимиту: ${paid.limitedTests || 0}/${paid.testLimit || 3} · 👑 тесты владельца: ${paid.ownerTests || 0}`,
+    );
+  }
+  if (apiEntries.length) {
+    for (const [id, st] of apiEntries) {
+      lines.push(`• <code>${escapeHtml(id)}</code>: ${st.calls || 0} (✅ ${st.ok || 0} · ❌ ${st.fails || 0})`);
+    }
+  } else {
+    lines.push("<i>Вызовов генерации сегодня ещё не было.</i>");
+  }
+
+  lines.push(
     "",
     "<b>Другие провайдеры</b>",
     `🟢 NVIDIA: ${today.nvidia || 0} запросов` +
       (today.nvidia ? " (свой лимит/кредиты)" : ""),
-  ];
+  );
 
   const history = await getUsageHistory(env, 7);
-  const past = history.slice(1).filter((d) => d.total > 0);
+  const past = history.slice(1).filter((d) => d.total > 0 || d.paidImage?.calls > 0);
 
   if (past.length) {
     lines.push("", "<b>Предыдущие дни</b>");
     for (const d of past) {
       const p = Math.min(100, (d.total / FREE_NEURONS_PER_DAY) * 100);
-      lines.push(`${d.date}: ${Math.round(d.total)} (${p.toFixed(0)}%)`);
+      const paidNote = d.paidImage?.calls
+        ? ` · 💳 DeepInfra: ${d.paidImage.calls} вызовов (≈ $${(d.paidImage.costUsd || 0).toFixed(3)})`
+        : "";
+      lines.push(`${d.date}: ${Math.round(d.total)} (${p.toFixed(0)}%)${paidNote}`);
     }
   }
 

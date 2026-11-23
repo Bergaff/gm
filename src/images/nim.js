@@ -1,4 +1,4 @@
-import { addUsage, estimateImageNeurons } from "../usage.js";
+import { addUsage, addApiUsage, estimateImageNeurons } from "../usage.js";
 import { imageProblem } from "./quality.js";
 
 const BASE = "https://ai.api.nvidia.com/v1/genai";
@@ -216,6 +216,7 @@ export function getDeepInfraProviders(env) {
     format: "json",
     keyEnv: "DEEPINFRA_API_KEY",
     model: "PrunaAI/p-image",
+    unitCostUsd: 0.005,
     timeoutMs: 30000,
     url: "https://api.deepinfra.com/v1/openai/images/generations",
     build: (prompt) => ({
@@ -1534,6 +1535,20 @@ export async function generateImage(prompt, env, options = {}) {
         };
       }
     }
+
+    // Учёт фактических вызовов API для владельческой /usage: сколько раз
+    // реально дёргали каждый провайдер за день и чем это кончилось.
+    // Пропуски по cooldown и тесты, заблокированные платным лимитом,
+    // сюда не попадают — там запроса к API не было.
+    await addApiUsage(env, provider.id, {
+      ok: result.ok,
+      paid: Boolean(provider.paid),
+      unitCostUsd: provider.unitCostUsd,
+      context: usage,
+      testContext: paidTestContext,
+      unlimited: Boolean(paidUnlimited),
+      testLimit: paidTestDailyLimit(env),
+    });
 
     attempts.push({
       provider: provider.id,

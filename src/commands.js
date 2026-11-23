@@ -2885,7 +2885,7 @@ function helpText(role) {
       "/stats_post &lt;id&gt;",
       "/stats_errors [N]",
       "/nim_health",
-      "/usage — остаток лимита Cloudflare",
+      "/usage — лимиты и сколько вызовов API было сегодня (включая DeepInfra)",
       "/change — модели во всех чатах, смена кнопками",
       "/examples — общие примеры подписей (.txt файлом)",
       "/examples_clear — удалить примеры",
