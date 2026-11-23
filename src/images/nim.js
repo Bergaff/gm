@@ -60,6 +60,7 @@ function markKeyFailed(idx, env, status) {
  */
 export const NIM_PROVIDERS = [
   {
+    timeoutMs: 10000, // эндпоинт у пользователя висит дольше — не ждём 20 сек
     id: "flux-schnell",
     title: "FLUX.1 schnell",
     url: `${BASE}/black-forest-labs/flux.1-schnell`,
@@ -69,6 +70,7 @@ export const NIM_PROVIDERS = [
     }),
   },
   {
+    timeoutMs: 10000,
     id: "flux-dev",
     title: "FLUX.1 dev",
     url: `${BASE}/black-forest-labs/flux.1-dev`,
@@ -191,6 +193,7 @@ export function getAllProviders(env) {
   return [
     ...getCfProviders(env),
     ...NIM_PROVIDERS,
+    ...getHfProviders(env),
     ...(pollinationsEnabled(env) ? [pollinationsProvider()] : []),
     ...getOpenRouterProviders(env),
     ...getCustomProviders(env),
@@ -228,7 +231,9 @@ export const CF_PROVIDERS = [
     title: "FLUX.1 schnell (Cloudflare, бесплатно)",
     binding: true,
     model: "@cf/black-forest-labs/flux-1-schnell",
-    build: (prompt, seed) => ({ prompt, seed, steps: 4 }),
+    // БЕЗ seed: актуальная схема модели его не принимает —
+    // «Additional properties '/seed' not allowed» (видно в /nim_health).
+    build: (prompt) => ({ prompt, steps: 4 }),
   },
   {
     // Отключена: по голосам в /models рейтинг 0% (0 лайков на 15 постов).
@@ -253,12 +258,21 @@ export const CF_PROVIDERS = [
   },
   {
     // FLUX второго поколения: быстрый и дешёвый по нейронам, качество
-    // заметно выше моделей SD-поколения.
+    // заметно выше моделей SD-поколения. ВАЖНО: модель принимает только
+    // multipart-form-data даже через binding (см. changelog Cloudflare),
+    // обычный JSON она отклоняет с «required properties are 'multipart'».
     id: "cf-flux2-klein",
     title: "FLUX.2 Klein 4B (Cloudflare, бесплатно)",
     binding: true,
+    multipart: true,
     model: "@cf/black-forest-labs/flux-2-klein-4b",
-    build: (prompt, seed) => ({ prompt, seed, steps: 4, width: 1024, height: 1024 }),
+    buildForm: (prompt) => {
+      const form = new FormData();
+      form.append("prompt", prompt);
+      form.append("width", "1024");
+      form.append("height", "1024");
+      return form;
+    },
   },
   {
     // Leonardo Lucid Origin — самая «красивая» из бесплатных CF-моделей,
@@ -293,6 +307,8 @@ export const CF_PROVIDERS = [
     }),
   },
   {
+    // Отключена: Cloudflare deprecated модель 2026-11-20 (5028 в /nim_health).
+    disabled: true,
     id: "cf-sdxl-base",
     title: "SDXL Base 1.0 (Cloudflare, бесплатно)",
     binding: true,
@@ -308,6 +324,8 @@ export const CF_PROVIDERS = [
     }),
   },
   {
+    // Отключена: Cloudflare deprecated модель 2026-11-20 (5028 в /nim_health).
+    disabled: true,
     id: "cf-dreamshaper",
     title: "DreamShaper 8 (Cloudflare, бесплатно)",
     binding: true,
@@ -632,6 +650,37 @@ function getCfProviders(env) {
   return env && env.AI ? CF_PROVIDERS : [];
 }
 
+// Multipart-вход для FLUX.2 через Workers AI binding.
+async function cfMultipartInput(provider, prompt, seed, negative) {
+  const form = provider.buildForm(prompt, seed, negative);
+  const serialized = new Response(form);
+  return {
+    multipart: {
+      body: serialized.body,
+      contentType: serialized.headers.get("content-type"),
+    },
+  };
+}
+
+// Hugging Face Inference: бесплатный аккаунт, токен HF_API_KEY.
+// FLUX.1-schnell/dev через официальный роутер; ответ — сами байты картинки.
+export function getHfProviders(env) {
+  if (!env?.HF_API_KEY) return [];
+  const make = (id, title, model) => ({
+    id,
+    title,
+    custom: true,
+    format: "raw",
+    keyEnv: "HF_API_KEY",
+    url: `https://router.huggingface.co/hf-inference/models/${model}`,
+    build: (prompt) => ({ inputs: prompt }),
+  });
+  return [
+    make("hf-flux-schnell", "FLUX.1 schnell (HuggingFace, бесплатно)", "black-forest-labs/FLUX.1-schnell"),
+    make("hf-flux-dev", "FLUX.1 dev (HuggingFace, бесплатно)", "black-forest-labs/FLUX.1-dev"),
+  ];
+}
+
 
 export function getProvider(id, env = null) {
   const list = env ? getAllProviders(env) : NIM_PROVIDERS;
@@ -864,10 +913,13 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
       let lastError = null;
       for (let i = 0; i < 2; i++) {
         try {
-          out = await env.AI.run(
-            provider.model,
-            provider.build(prompt, seed, negative)
-          );
+          // FLUX.2-модели принимают только multipart даже через binding:
+          // FormData сериализуем через Response, чтобы получить stream
+          // и content-type с boundary (приём из официального changelog).
+          const input = provider.multipart
+            ? await cfMultipartInput(provider, prompt, seed, negative)
+            : provider.build(prompt, seed, negative);
+          out = await env.AI.run(provider.model, input);
           lastError = null;
           break;
         } catch (e) {
@@ -1037,14 +1089,16 @@ function baseAutoPriority(provider) {
   // чего тесты висели, а до рабочих моделей очередь не доходила.
   if (id === "cf-flux") return 95;
   if (id === "cf-flux2-klein") return 90;
-  if (id === "cf-lucid") return 85;
-  if (id === "flux-schnell") return 80;
-  if (id === "cf-phoenix") return 78;
-  if (id === "pollinations") return 75;
-  if (id === "cf-dreamshaper") return 65;
+  if (id === "cf-phoenix") return 88;
+  if (id === "pollinations") return 82;
+  if (id === "cf-lucid") return 78; // качество топ, но дорого по нейронам
+  if (id === "hf-flux-schnell") return 72;
+  if (id === "hf-flux-dev") return 66;
   if (provider.custom) return 60;
-  if (id === "cf-sdxl-base") return 55;
-  if (id === "flux-dev") return 50;
+  // NVIDIA genai-эндпоинты у пользователя стабильно висят до таймаута —
+  // в самый хвост очереди и с коротким личным таймаутом (timeoutMs ниже).
+  if (id === "flux-schnell") return 40;
+  if (id === "flux-dev") return 35;
   return 45;
 }
 
@@ -1229,7 +1283,7 @@ export async function generateImage(prompt, env, options = {}) {
     let result;
 
     try {
-      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, remainingMs())));
+      result = await callProvider(provider, prompt, env, keys[keyIndex] || null, negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, provider.timeoutMs || TIMEOUT_MS, remainingMs())));
 
 
       // Ключ упёрся в лимит или протух — пробуем следующий на этой же модели.
@@ -1238,7 +1292,7 @@ export async function generateImage(prompt, env, options = {}) {
         const nextIndex = (keyIndex + 1) % keys.length;
         if (nextIndex !== keyIndex) {
           keyIndex = nextIndex;
-          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, remainingMs())));
+          result = await callProvider(provider, prompt, env, keys[keyIndex], negative, Math.max(1000, Math.min(attemptTimeoutMs > 0 ? attemptTimeoutMs : TIMEOUT_MS, provider.timeoutMs || TIMEOUT_MS, remainingMs())));
         }
       }
     } catch (error) {
