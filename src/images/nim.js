@@ -670,25 +670,31 @@ async function cfMultipartInput(provider, prompt, seed, negative) {
   };
 }
 
-// Hugging Face Inference: бесплатный аккаунт, токен HF_API_KEY.
-// FLUX.1 через hf-inference закрыт («deprecated by provider hf-inference»
-// в /nim_health), поэтому здесь Stable Diffusion 3.5 Large: модель живая,
-// но гейтед — владелец токена должен один раз принять лицензию Stability
-// на странице модели, иначе будет 403. Генерирует медленно (минута+),
-// поэтому свой длинный timeoutMs и место в хвосте очереди.
+// Hugging Face Inference Providers: токен HF_API_KEY.
+// Собственный hf-inference закрыт и для FLUX, и для SD 3.5 («Model not
+// supported by provider hf-inference»), поэтому идём через партнёра fal-ai
+// официальным маршрутом роутера: /fal-ai/<providerModelId> (двойной
+// fal-ai — не опечатка). Ответ fal — JSON с images[0].url.
+// ВАЖНО про деньги: роутер списывает кредиты HF-аккаунта. На бесплатном
+// тарифе их символически хватает на несколько картинок, дальше 402.
 export function getHfProviders(env) {
   if (!env?.HF_API_KEY) return [];
   return [{
     id: "hf-sd35-large",
-    title: "SD 3.5 Large (HuggingFace, бесплатно)",
+    title: "SD 3.5 Large (HuggingFace via fal)",
     custom: true,
-    format: "raw",
+    format: "json",
     keyEnv: "HF_API_KEY",
     timeoutMs: 100000,
-    url: "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3.5-large",
-    build: (prompt) => ({
-      inputs: prompt,
-      parameters: { width: 1024, height: 1024, num_inference_steps: 28, guidance_scale: 4.5 },
+    url: "https://router.huggingface.co/fal-ai/fal-ai/stable-diffusion-v35-large",
+    build: (prompt, seed) => ({
+      prompt,
+      seed,
+      image_size: { width: 1024, height: 1024 },
+      num_inference_steps: 28,
+      guidance_scale: 4.5,
+      num_images: 1,
+      output_format: "png",
     }),
   }];
 }
@@ -730,7 +736,10 @@ function extractBase64(payload) {
 }
 
 function extractUrl(payload) {
-  return payload?.data?.[0]?.url || payload?.artifacts?.[0]?.url || null;
+  return payload?.data?.[0]?.url || payload?.artifacts?.[0]?.url ||
+    payload?.images?.[0]?.url || // fal-ai через HF-роутер
+    (typeof payload?.images?.[0] === "string" ? payload.images[0] : null) ||
+    null;
 }
 
 export function base64ToBytes(base64) {
@@ -900,7 +909,7 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
     // а 402 FREE_LIMIT — это «1 картинка в 45 сек с IP»: один повтор
     // через паузу часто спасает (в утренней отправке запрос обычно один).
     if (!response.ok && [0, 402, 429, 503].includes(response.status || 0)) {
-      await sleepMs(response.status === 402 ? 8000 : 3000);
+      await sleepMs(response.status === 402 ? 12000 : 3000);
       response = await doFetch();
     }
     const latency = Date.now() - started;
@@ -1028,7 +1037,7 @@ async function callProvider(provider, prompt, env, apiKey, negative = "", timeou
   const url = extractUrl(payload);
 
   if (url) {
-    const imageResponse = await fetch(url);
+    const imageResponse = await fetch(url, { signal: AbortSignal.timeout(fetchTimeout) });
     if (imageResponse.ok) {
       return {
         ok: true,
